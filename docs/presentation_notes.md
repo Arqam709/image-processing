@@ -1,6 +1,6 @@
 # Presentation Notes (simple English)
 
-_Last updated: 2026-11-16 (after Stage 2)_
+_Last updated: 2026-11-16 (after Stage 3)_
 
 ## What the project does (planned, in one breath)
 "We take a clean picture, add a known amount of noise to it on purpose, try
@@ -59,7 +59,7 @@ check the file's fingerprint (SHA-256 hash) is unchanged after loading.
 
 **How do you know the code works?**
 32 automated unit tests for Stage 1 (Python `unittest`), run on 2026-11-16, all passing
-(63 in total after Stage 2).
+(63 in total after Stage 2, 101 after Stage 3).
 They check correct pixel values, colour-to-gray conversion, and every error
 case: missing file, empty file, corrupted file, wrong type, and so on.
 
@@ -131,6 +131,57 @@ have nearly identical MSE but very different visual quality.
 **Did you check your PSNR against OpenCV?**
 Yes. For non-identical images, our result equals `cv2.PSNR` to at least 6 decimal
 places (automated tests on random image pairs and on the synthetic image).
+
+---
+
+## Stage 3: adding noise
+
+**One-sentence summary:** "We damage a clean image on purpose, in three
+different ways and at three strengths, so we know exactly what the correct
+image is and can later measure how well each filter repairs it."
+
+**Gaussian noise (the standard "additive white Gaussian noise" model in denoising research [V8])**
+* Every pixel gets a small random number added: noisy = original + n.
+* n comes from a bell-shaped (normal) distribution with mean 0. σ (sigma) says how wide the bell is.
+* σ = 10 means most pixels move by less than about ±10 levels (about 68% within ±σ).
+* **σ is not a percentage of pixels.** Almost every pixel changes (95.8% at σ = 10); σ controls *how much*.
+* Our results: σ = 10 → 28.15 dB, σ = 25 → 20.51 dB, σ = 50 → 15.00 dB.
+
+**Salt-and-pepper noise (impulse noise, e.g. caused by bit errors during acquisition and transmission [V9])**
+* A chosen fraction of pixels becomes pure white (salt, 255) or pure black (pepper, 0). All other pixels stay exactly the same.
+* amount = 0.05 means 5% of the pixels are *selected*: 0.05 × 65,536 = 3276.8 → 3,277 pixels (1,638 white + 1,639 black).
+* **Selected vs. changed:** a white pixel that gets salt stays white, so it was selected but did not change. Our test image has no pure black or white pixels, so there every selected pixel changed.
+* Few pixels, but huge errors per pixel. That is why 2% salt-and-pepper (MSE 413) has a bigger MSE than Gaussian σ = 10 (MSE 100).
+
+**Speckle noise (granular, brightness-dependent noise, e.g. in ultrasound images [V10])**
+* noisy = original + original × n. The noise is *multiplied* by the brightness.
+* Bright pixels get big changes, dark pixels small ones, and black pixels none at all.
+* Example with variance 0.01 (standard deviation 0.1, i.e. about ±10%): a pixel of 40 moves about ±4, and a pixel of 160 moves about ±16 (our test measured exactly this).
+* In our figure, speckle is clearly visible on the bright circle but hardly on the dark square.
+* Honest limitation: this is a simplified model. Real ultrasound/radar speckle is more complex (other distributions, correlated between neighbouring pixels).
+
+**Random seeds (reproducibility)**
+* A computer's "random" numbers come from a formula started by a *seed*. Same seed → same numbers → same noisy image, every time.
+* We use seed 42 for every experiment and write it in the file name, e.g. `..._gaussian_sigma25__seed42.png`.
+* We ran the demo twice: the output files were byte-for-byte identical.
+* Each call creates its own generator (`default_rng(seed)`), so experiments cannot influence each other.
+
+**What is clipping and why does it matter?**
+* Pixels must stay between 0 and 255. If noise pushes a value to 270, we set it to 255; if to −5, we set it to 0.
+* Without clipping, uint8 would "wrap around": 270 would become 14, so a bright pixel would turn almost black. That is a bug, and we have tests that catch it.
+* Side effect: clipping cuts off some noise, so the measured MSE is lower than the theory predicts. At σ = 50 we measured only 82% of the expected σ² = 2500.
+
+**Comparing noise types with PSNR**
+* Within one noise type: stronger noise → lower PSNR, always (our 9 results).
+* Across noise types: careful! Gaussian σ = 50 (15.00 dB) and salt-and-pepper 10% (14.94 dB) have nearly the same PSNR, but in the salt-and-pepper image 90% of the pixels are still perfect and the shapes are clearly visible. Same number, different damage.
+
+**Likely questions about Stage 3**
+* *Why add noise artificially instead of using real noisy photos?* Because we need the clean original to compute MSE/PSNR. With artificial noise we know the exact ground truth and can control the strength.
+* *Why these strengths?* Three levels (low/medium/high) per type, to see the trend. They are our own choices, not standard values.
+* *Why does Gaussian noise change almost all pixels but salt-and-pepper only some?* Gaussian adds a random value to every pixel; salt-and-pepper replaces only the selected pixels.
+* *Why is the speckle noise invisible on the dark square?* Because the noise is multiplied by the pixel value: 20 × 0.1 = ±2 levels, too small to see.
+* *Why round instead of just converting to integers?* Converting cuts off the decimals (2.9 → 2), which would make every pixel slightly too dark on average. Rounding (2.9 → 3) has no such bias.
+* *Is your salt-and-pepper the same as in other libraries?* The idea is the same, but scikit-image decides each pixel by "coin flip", so the count varies. We select an exact number, so the result is easier to check and compare.
 
 ---
 

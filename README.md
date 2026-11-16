@@ -5,9 +5,10 @@ noise (Gaussian, salt-and-pepper, speckle) to clean grayscale images, remove it
 with classic filters (mean, Gaussian, median, bilateral), and compare the
 filters fairly using MSE and PSNR.
 
-**Current status: Stages 1–2 are complete.** They cover image loading,
-validation, pixel statistics and the image quality metrics MSE and PSNR.
-Noise, filters and experiments come in later stages.
+**Current status: Stages 1–3 are complete.** They cover image loading,
+validation, pixel statistics, the image quality metrics MSE and PSNR, and
+three reproducible noise models (Gaussian, salt-and-pepper, speckle).
+Filters and the full experiment runner come in later stages.
 
 ## Setup (Windows PowerShell)
 
@@ -34,6 +35,17 @@ python -m demos.demo_metrics                # print a step-by-step example and r
 python -m demos.demo_metrics --show         # also show original vs modified images
 python -m demos.demo_metrics --save-figure  # save results\figures\stage2_metric_validation.png
 ```
+
+## Run the Stage 3 demonstration (adding noise)
+
+```powershell
+python -m demos.demo_noise                  # print the MSE/PSNR table for 9 noisy images
+python -m demos.demo_noise --show           # also show the comparison figure
+python -m demos.demo_noise --save-figure    # save results\figures\stage3_noise_examples.png
+python -m demos.demo_noise --save-outputs   # save noisy PNGs (results\noisy) + CSV (results\tables)
+```
+
+All noise uses the fixed seed 42, so every run gives exactly the same images.
 
 ## Run the tests
 

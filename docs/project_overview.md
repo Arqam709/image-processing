@@ -1,6 +1,6 @@
 # Project Overview: Image Noise Addition and Removal
 
-_Last updated: 2026-11-16 (after Stage 2)_
+_Last updated: 2026-11-16 (after Stage 3)_
 
 ## Objective
 Build a Python system that takes a clean digital image, adds controlled noise,
@@ -33,7 +33,7 @@ and why.
 
 ## Scope
 * **In scope:** 8-bit grayscale images; Gaussian, salt-and-pepper and speckle
-  noise; mean, Gaussian, median and bilateral filters; MSE and PSNR (implemented).
+  noise (implemented); mean, Gaussian, median and bilateral filters; MSE and PSNR (implemented).
 * **Possible later:** SSIM, colour (RGB) images, a simple Tkinter interface.
 * **Out of scope:** deep-learning denoising, real camera noise modelling.
 
@@ -42,7 +42,7 @@ and why.
 |---|---|---|
 | 1 | Folder structure, docs, image loading and validation, pixel statistics, synthetic test image | ✅ Done |
 | 2 | MSE and PSNR metrics (`src/metrics.py`, 31 tests, demo) | ✅ Done (63/63 tests pass) |
-| 3 | Noise functions (Gaussian, salt-and-pepper, speckle) | Not started |
+| 3 | Noise functions (`src/noise.py`, 38 tests, demo, 9 baseline experiments E001–E009) | ✅ Done (101/101 tests pass) |
 | 4 | Filters (mean, Gaussian, median, bilateral) | Not started |
 | 5 | Visualization (comparison figures) | Not started |
 | 6 | Experiment runner (CSV table + saved images) | Not started |
@@ -68,6 +68,15 @@ and why.
 | D11 | MSE subtracts in float64, never uint8 | NumPy uint8 subtraction wraps around silently (10 − 12 = 254). A deliberately buggy uint8 version failed 6 tests. |
 | D12 | Metrics accept only same-shape, 2-D uint8 images, and errors name the bad argument | Prevents silent broadcasting or comparing wrong images. A version without validation failed 7 tests. |
 | D13 | MAX = 255 is a fixed constant (no parameter) | All our images are 8-bit, so a parameter would only add a way to make mistakes. |
+| D14 | Every noise call creates its own `np.random.default_rng(seed)`; the global `np.random` state is never used | NumPy's recommended generator; reproducible; one call cannot affect another. A version using the global state failed our test. |
+| D15 | Seeds must be `None` or non-negative integers; booleans are rejected | NumPy itself rejects negative seeds but accepts `True` (observed), which would silently act as seed 1. |
+| D16 | Gaussian/speckle: calculate in float64, then **round** (`np.rint`), **clip** to [0, 255], convert to uint8 | Rounding avoids the downward bias of truncation; clipping avoids uint8 wrap-around. Both bugs were caught by tests in mutation checks. |
+| D17 | Salt-and-pepper selects an **exact** number of pixels without replacement: selected = ⌊amount·N + 0.5⌋, salt = ⌊selected/2⌋, pepper = rest | Every run with the same amount corrupts exactly the same number of pixels, which can be checked by hand. This deliberately differs from scikit-image, which decides per pixel. |
+| D18 | Salt = 255, pepper = 0 (the extreme values of 8-bit images) | Matches the definition "maximum or minimum gray level" [V9]. |
+| D19 | Speckle uses g = f + f·n with Gaussian n (γ = 1) | The same form as scikit-image's 'speckle' mode; simple and clearly brightness-dependent. Documented as a simplified model. |
+| D20 | Strength 0 returns a copy; invalid strengths (negative, NaN, ±∞, bool, non-numbers) raise errors | Predictable behaviour; a copy means callers can never accidentally modify the original. |
+| D21 | Demo seed = 42 for every experiment; outputs are named `<image>__<noise>_<param><value>__seed<seed>.png` | The file name alone tells you how to reproduce the image. |
+| D22 | Generated results (noisy PNGs, CSV, figures) may be overwritten by the demo, but inputs never | Results are deterministic and can be regenerated; `save_grayscale_image(..., overwrite=True)` is used only for `results/`. |
 
 ## Open items
 * `course_material/template.docx` was read on 2026-11-16. Findings are in `report_notes.md` §0.

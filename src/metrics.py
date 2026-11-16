@@ -1,22 +1,3 @@
-"""Image quality metrics: Mean Squared Error (MSE) and Peak Signal-to-Noise Ratio (PSNR).
-
-Both metrics compare a *processed* image (for example noisy or filtered)
-with the clean *original* image, pixel by pixel. See docs/report_notes.md,
-section 3.2, for the formulas and their limitations.
-
-Why we convert to float64 before subtracting
---------------------------------------------
-Our images are uint8 (unsigned 8-bit integers, 0..255). uint8 arithmetic
-"wraps around" instead of going negative or above 255:
-
-    np.uint8(10) - np.uint8(20)  ->  246   (not -10)
-
-because -10 is stored modulo 256. Squaring 246 instead of -10 would give a
-completely wrong error. Squares can also be far larger than 255
-(255**2 = 65025). Converting to float64 first gives correct negative
-differences and enough room for large sums.
-"""
-
 import math
 
 import numpy as np
@@ -59,15 +40,7 @@ def mse(original, processed):
 
 
 def psnr(original, processed):
-    """Return the Peak Signal-to-Noise Ratio in decibels (dB).
-
-        PSNR = 10 * log10( MAX^2 / MSE ),   MAX = 255 for 8-bit images
-
-    Higher values mean the processed image is closer to the original.
-    For identical images MSE = 0, so the ratio is a division by zero and
-    PSNR is mathematically infinite: we return math.inf explicitly.
-    (cv2.PSNR instead returns a large finite number, about 361.2 dB.)
-    """
+    
     error = mse(original, processed)  # validates the inputs too
     if error == 0.0:
         return math.inf
