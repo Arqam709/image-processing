@@ -5,10 +5,11 @@ noise (Gaussian, salt-and-pepper, speckle) to clean grayscale images, remove it
 with classic filters (mean, Gaussian, median, bilateral), and compare the
 filters fairly using MSE and PSNR.
 
-**Current status: Stages 1–3 are complete.** They cover image loading,
-validation, pixel statistics, the image quality metrics MSE and PSNR, and
-three reproducible noise models (Gaussian, salt-and-pepper, speckle).
-Filters and the full experiment runner come in later stages.
+**Current status: Stages 1–4 are complete.** They cover image loading,
+validation, pixel statistics, the image quality metrics MSE and PSNR,
+three reproducible noise models (Gaussian, salt-and-pepper, speckle), and
+four noise-removal filters (mean, Gaussian, median, bilateral).
+Comparison figures for all settings and the full experiment runner come in later stages.
 
 ## Setup (Windows PowerShell)
 
@@ -46,6 +47,19 @@ python -m demos.demo_noise --save-outputs   # save noisy PNGs (results\noisy) + 
 ```
 
 All noise uses the fixed seed 42, so every run gives exactly the same images.
+
+## Run the Stage 4 demonstration (removing noise with filters)
+
+```powershell
+python -m demos.demo_filters                  # print the comparison tables
+python -m demos.demo_filters --show           # also show the comparison figure
+python -m demos.demo_filters --save-figure    # save results\figures\stage4_filter_comparison.png
+python -m demos.demo_filters --save-outputs   # save filtered PNGs (results\filtered) + CSV (results\tables)
+```
+
+The demo recreates two Stage 3 noisy images (Gaussian σ = 25 and
+salt-and-pepper 5%, seed 42), applies all four filters to the **same** noisy
+image, and prints MSE and PSNR for each one. It never changes the Stage 3 files.
 
 ## Run the tests
 

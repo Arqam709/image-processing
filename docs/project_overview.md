@@ -1,6 +1,6 @@
 # Project Overview: Image Noise Addition and Removal
 
-_Last updated: 2026-11-16 (after Stage 3)_
+_Last updated: 2026-11-16 (after Stage 4)_
 
 ## Objective
 Build a Python system that takes a clean digital image, adds controlled noise,
@@ -33,7 +33,7 @@ and why.
 
 ## Scope
 * **In scope:** 8-bit grayscale images; Gaussian, salt-and-pepper and speckle
-  noise (implemented); mean, Gaussian, median and bilateral filters; MSE and PSNR (implemented).
+  noise (implemented); mean, Gaussian, median and bilateral filters (implemented); MSE and PSNR (implemented).
 * **Possible later:** SSIM, colour (RGB) images, a simple Tkinter interface.
 * **Out of scope:** deep-learning denoising, real camera noise modelling.
 
@@ -43,7 +43,7 @@ and why.
 | 1 | Folder structure, docs, image loading and validation, pixel statistics, synthetic test image | ✅ Done |
 | 2 | MSE and PSNR metrics (`src/metrics.py`, 31 tests, demo) | ✅ Done (63/63 tests pass) |
 | 3 | Noise functions (`src/noise.py`, 38 tests, demo, 9 baseline experiments E001–E009) | ✅ Done (101/101 tests pass) |
-| 4 | Filters (mean, Gaussian, median, bilateral) | Not started |
+| 4 | Filters (`src/filters.py`, 43 tests, demo, 8 filter experiments E010–E017 on baselines G002 and G005) | ✅ Done (144/144 tests pass) |
 | 5 | Visualization (comparison figures) | Not started |
 | 6 | Experiment runner (CSV table + saved images) | Not started |
 | 7 | Analysis of real results | Not started |
@@ -77,8 +77,17 @@ and why.
 | D20 | Strength 0 returns a copy; invalid strengths (negative, NaN, ±∞, bool, non-numbers) raise errors | Predictable behaviour; a copy means callers can never accidentally modify the original. |
 | D21 | Demo seed = 42 for every experiment; outputs are named `<image>__<noise>_<param><value>__seed<seed>.png` | The file name alone tells you how to reproduce the image. |
 | D22 | Generated results (noisy PNGs, CSV, figures) may be overwritten by the demo, but inputs never | Results are deterministic and can be regenerated; `save_grayscale_image(..., overwrite=True)` is used only for `results/`. |
+| D23 | Filters are thin wrappers around OpenCV (`cv2.blur`, `cv2.GaussianBlur`, `cv2.medianBlur`, `cv2.bilateralFilter`); we do not reimplement the algorithms | Tested, fast, standard implementations. Our code only validates inputs and fixes the settings. |
+| D24 | Border handling is passed explicitly: `BORDER_REFLECT_101` for mean, Gaussian and bilateral; median always uses `BORDER_REPLICATE` inside OpenCV (no parameter) | `BORDER_REFLECT_101` is OpenCV's default, so behaviour is unchanged, but now visible in the code. Both border behaviours are checked by known-answer tests. |
+| D25 | Kernel sizes must be odd integers ≥ 1 (all three kernel filters); booleans and floats are rejected | An odd window has a centre pixel. OpenCV rejects even sizes for Gaussian and median, but `cv2.blur` silently accepts them (observed), so we check ourselves for consistency. Size 1 = no change, as documented by OpenCV 5.x for the median filter and observed for all three. |
+| D26 | Gaussian `sigma` ≥ 0, where 0 means "computed by OpenCV from the kernel size"; the same sigma is passed for x and y | OpenCV recommends specifying sigmaX and sigmaY explicitly. With kernel 3 and sigma 0 OpenCV uses fixed weights [1/4, 1/2, 1/4] (read in the OpenCV source, confirmed by a test). |
+| D27 | Bilateral `diameter` must be odd and ≥ 3; `sigma_color` and `sigma_space` must be > 0 | OpenCV computes radius = d // 2 (at least 1), so d = 1, 2, 3 all behave the same and an even d acts like d + 1 (observed); sigmas ≤ 0 are silently replaced by 1 (observed). Rejecting these avoids misleading parameter labels. |
+| D28 | Demo default settings: kernel 3 for mean/Gaussian/median; bilateral d = 5, sigmaColor = sigmaSpace = 50 | Kernel 3 is the smallest smoothing window and is the same for the three kernel filters. The bilateral values follow OpenCV's documented guidance (d = 5; equal sigmas; < 10 little effect, > 150 "cartoonish"). Not tuned for best PSNR. |
+| D29 | Stage 4 demo recreates the Stage 3 noisy images G002 and G005 with seed 42 instead of reading them, and checks they equal the saved PNGs (read-only) | Works even when `results/` is empty; proves the filters see exactly the Stage 3 baselines; never overwrites Stage 3 files. New experiment IDs continue at E010. |
+| D30 | The demo also reports MSE inside two regions (flat patch, 1-pixel line block) and the effect of each filter on the clean image | The first run showed that the line block dominates the whole-image MSE. Without the breakdown the whole-image numbers alone would be misleading (see report_notes §4.2). |
 
 ## Open items
 * `course_material/template.docx` was read on 2026-11-16. Findings are in `report_notes.md` §0.
 * The student's own photograph is not yet in `data/input/`.
-* OpenCV documentation URLs (V1, V2, V4 in `references.md`) should be opened once in a browser, because the site blocks automated checks.
+* OpenCV documentation URLs (V1, V2, V4, V12 in `references.md`) should be opened once in a browser, because the site blocks automated checks.
+* Filter results so far cover only one setting per filter, two noise cases, one image and one seed. Comparing several kernel sizes and all nine noise baselines is planned for the experiment runner (Stage 6).

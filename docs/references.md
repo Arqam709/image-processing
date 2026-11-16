@@ -1,6 +1,6 @@
 # References
 
-_Last updated: 2026-11-16 (after Stage 3)_
+_Last updated: 2026-11-16 (after Stage 4)_
 
 Citation style: **IEEE numbered**. The template's own example reference is
 in IEEE style (authors, "title," venue, vol., pp., year, doi), so this is consistent.
@@ -8,9 +8,9 @@ Template requirement: "Please put a least five Reference".
 Final numbers [1], [2], ... are assigned in order of first citation when the
 report is written. Until then, verified sources use IDs V1, V2, ...
 
-**Status: 11 verified sources (V1–V11).**
-* **Academic, peer-reviewed (4):** V5, V8, V9, V10.
-* **Official technical documentation / source code (7):** V1, V2, V3, V4, V6, V7, V11.
+**Status: 13 verified sources (V1–V13).**
+* **Academic, peer-reviewed (5):** V5, V8, V9, V10, V13 (V13: content checked in the authors' HTML version, see its entry).
+* **Official technical documentation / source code (8):** V1, V2, V3, V4, V6, V7, V11, V12.
 
 No textbook is verified yet: we could not inspect the contents of Gonzalez and
 Woods online (see section D).
@@ -94,9 +94,16 @@ we rely on is really there.
   * "With the presence of noise, possible subsequent image processing tasks, such as video processing, image analysis, and tracking, are adversely affected. Therefore, image denoising plays an important role in modern image processing systems."
   * "y = x + n (1) where y is the observed noisy image, x is the unknown clean image, and n represents additive white Gaussian noise (AWGN) with standard deviation σ"
   * "since noise, edge, and texture are high frequency components, it is difficult to distinguish them in the process of denoising and the denoised images could inevitably lose some details."
-  * Also mentions median filtering, and bilateral filtering as "a non-linear, edge-preserving, and noise-reducing smoothing filter" (useful in Stage 4), and PSNR/SSIM as evaluation metrics.
-* **Supports:** why noise matters; the Gaussian noise model; the denoising trade-off.
-* **Cite in:** 1 Introduction, 3 Methods (3.3.1; later 3.4).
+  * Also mentions PSNR/SSIM as evaluation metrics.
+* **Filter quotes (re-read on 2026-11-16 for Stage 4, section "Spatial domain filtering"):**
+  * "The major challenges for image denoising are as follows: flat areas should be smooth, edges should be protected without blurring, textures should be preserved, and new artifacts should not be generated."
+  * "Originally, linear filters were adopted to remove noise in the spatial domain, but they fail to preserve image textures."
+  * "Mean filtering [14] has been adopted for Gaussian noise reduction, however, it can over-smooth images with high noise [15]."
+  * "By using non-linear filters, such as median filtering [14, 18] and weighted median filtering [19], noise can be suppressed without any identification."
+  * "As a non-linear, edge-preserving, and noise-reducing smoothing filter, Bilateral filtering [10] is widely used for image denoising." "One issue concerning the bilateral filter is its efficiency." (Their reference [10] is Tomasi and Manduchi 1998 = our V13.)
+  * "Normally, spatial filters eliminate noise to a reasonable extent but at the cost of image blurring, which in turn loses sharp edges."
+* **Supports:** why noise matters; the Gaussian noise model; the denoising trade-off; the general properties of mean, median and bilateral filtering.
+* **Cite in:** 1 Introduction, 3 Methods (3.3.1, 3.4).
 
 ### [V9] Ma and Nie (2018): salt-and-pepper noise (peer-reviewed, open access) [academic]
 * **IEEE:** H. Ma and Y. Nie, "A two-stage filter for removing salt-and-pepper noise using noise detector based on characteristic difference parameter and adaptive directional mean filter," *PLOS ONE*, vol. 13, no. 10, Art. no. e0205736, Oct. 2018, doi: 10.1371/journal.pone.0205736.
@@ -106,8 +113,13 @@ we rely on is really there.
   * "Salt-and-pepper noise and random-valued noise are the two common types of impulse noise. The salt-and-pepper noise can corrupt an image where each corrupted pixel takes either the maximum or minimum gray level."
   * It "can not only significantly deteriorate the quality of an image, but also bring some difficulty to the subsequent image analysis such as image segmentation, edge detection and classification"
   * Also defines PSNR with MAX = 255 for gray images and MSE between the original noise-free image and the restored image (consistent with our §3.2).
-* **Supports:** the salt-and-pepper definition, why impulse noise matters, and that random-valued noise is a separate type.
-* **Cite in:** 1 Introduction, 3 Methods (3.3.2).
+* **Median filter quotes (re-read on 2026-11-16 for Stage 4, Introduction):**
+  * "the standard median filter is one of the most popular nonlinear filters for the removal of salt-and-pepper noise in terms of its good denoising capability and computational efficiency"
+  * "The standard median filter uniformly replaces the gray level of each noise corrupted pixel by the median gray level of its neighborhood pixels."
+  * "Hence, the standard median filter is effective in the case of low noise density."
+  * "While the noise density is higher than 50%, the size of filtering window should to be enlarged to suppress serious noise which leads edges and details to be blurred." (quoted as written)
+* **Supports:** the salt-and-pepper definition, why impulse noise matters, that random-valued noise is a separate type, and why the median filter is the standard choice for salt-and-pepper noise.
+* **Cite in:** 1 Introduction, 3 Methods (3.3.2, 3.4).
 
 ### [V10] Yu et al. (2018): speckle noise in ultrasound (peer-reviewed, open access) [academic]
 * **IEEE:** H. Yu, M. Ding, X. Zhang, and J. Wu, "PCANet based nonlocal means method for speckle noise removal in ultrasound images," *PLOS ONE*, vol. 13, no. 10, Art. no. e0205390, Oct. 2018, doi: 10.1371/journal.pone.0205390.
@@ -129,6 +141,44 @@ we rely on is really there.
   * 'gaussian': "Gaussian-distributed additive noise."
 * **Supports:** our speckle model is the same form as an established library; our salt-and-pepper design choice differs on purpose.
 * **Cite in:** 3 Methods (3.3.2, 3.3.3).
+
+### [V12] OpenCV: image filtering (blur, GaussianBlur, medianBlur, bilateralFilter, getGaussianKernel, border types) [technical documentation]
+* **IEEE draft:** OpenCV, "Image filtering," *OpenCV Documentation*. [Online]. Available: https://docs.opencv.org/4.x/d4/d86/group__imgproc__filter.html
+* **Author/organization:** OpenCV team · **Year:** documentation for the 4.x/5.x branches
+* **How verified (2026-11-16):** docs.opencv.org blocks automated access (see V1), so we read the official source files on GitHub (https://github.com/opencv/opencv), **5.x branch** (our installed version is 5.0.0), and compared with 4.x:
+  * documentation comments in `modules/imgproc/include/opencv2/imgproc.hpp`
+  * border types in `modules/core/include/opencv2/core/base.hpp`
+  * implementation details in `modules/imgproc/src/smooth.dispatch.cpp`, `bilateral_filter.dispatch.cpp` and `median_blur.dispatch.cpp`
+  * **The docs URL above was not opened. Action for the student:** open it in a browser and check that it shows these functions.
+* **Quotes we rely on (imgproc.hpp, 5.x):**
+  * `blur`: "Blurs an image using the normalized box filter." Kernel K = 1/(ksize.width·ksize.height) × a matrix of ones.
+  * `GaussianBlur`: "ksize.width and ksize.height can differ but they both must be positive and odd." sigmaY: "if sigmaY is zero, it is set to be equal to sigmaX, if both sigmas are zeros, they are computed from ksize.width and ksize.height … it is recommended to specify all of ksize, sigmaX, and sigmaY."
+  * `getGaussianKernel`: G_i = α·exp(−(i − (ksize−1)/2)² / (2·sigma²)), with α chosen so that ΣG_i = 1; "If it is non-positive, it is computed from ksize as `sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8`."
+  * `medianBlur`: "The median filter uses #BORDER_REPLICATE internally to cope with border pixels". ksize: "it must be odd and positive, for example: 1, 3, 5, 7 ... (ksize = 1 returns the image unchanged)". "when ksize is 3 or 5, the image depth should be CV_8U, CV_16U, or CV_32F, for larger aperture sizes, it can only be CV_8U." (The 4.x header instead says "odd and greater than 1"; our 5.0.0 behaves as the 5.x text says: tested.)
+  * `bilateralFilter`: "bilateralFilter can reduce unwanted noise very well while keeping edges fairly sharp. However, it is very slow compared to most filters." "For simplicity, you can set the 2 sigma values to be the same. If they are small (< 10), the filter will not have much effect, whereas if they are large (> 150), they will have a very strong effect, making the image look "cartoonish"." "Large filters (d > 5) are very slow, so it is recommended to use d=5 for real-time applications, and perhaps d=9 for offline applications that need heavy noise filtering." d: "Diameter of each pixel neighborhood that is used during filtering. If it is non-positive, it is computed from sigmaSpace." sigmaColor: "A larger value of the parameter means that farther colors within the pixel neighborhood … will be mixed together". sigmaSpace: "A larger value of the parameter means that farther pixels will influence each other as long as their colors are close enough". It links to Tomasi and Manduchi's page (V13).
+  * Border types (base.hpp): `BORDER_REPLICATE` "aaaaaa|abcdefgh|hhhhhhh"; `BORDER_REFLECT_101` "gfedcb|abcdefgh|gfedcba"; `BORDER_DEFAULT` "same as BORDER_REFLECT_101".
+* **Source-code facts (not stated in the documentation text):**
+  * Bilateral: `radius = (d <= 0) ? cvRound(sigmaSpace * 1.5) : d / 2; return std::max(radius, 1);` so d = 1, 2, 3 give the same result, and an even d acts like d + 1 (both also observed by us).
+  * Gaussian: with sigma ≤ 0 and kernel size 3, 5, 7 or 9, fixed "bit-exact" kernels are used, e.g. [0.25, 0.5, 0.25] for size 3, instead of the sigma formula. We measured that `GaussianBlur(…, (3, 3), 0)` and `GaussianBlur(…, (3, 3), 0.8)` differ by up to 5 levels on a random image.
+  * Median: `CV_Assert(ksize % 2 == 1 …)` and `if (ksize <= 1 …) copy`, i.e. even sizes raise an error and size 1 copies the image.
+* **Supports:** how each filter works, what the parameters mean, the border behaviour, and our validation rules and default settings.
+* **Cite in:** 3 Methods (3.4).
+
+### [V13] Tomasi and Manduchi (1998): the bilateral filter [academic, conference paper]
+* **IEEE:** C. Tomasi and R. Manduchi, "Bilateral filtering for gray and color images," in *Proc. 6th Int. Conf. Computer Vision (ICCV)*, 1998, pp. 839–846, doi: 10.1109/ICCV.1998.710815.
+* **How verified (2026-11-16):**
+  * **Bibliographic data:** Crossref (title, authors, container "Sixth International Conference on Computer Vision (IEEE Cat. No.98CH36271)", pages 839–846). Crossref has no issue date; the year 1998 comes from the DOI and the conference name.
+  * **Content:** the PDF on R. Manduchi's university page (https://users.soe.ucsc.edu/~manduchi/Papers/ICCV98.pdf, 8 pages) downloaded, but our simple text extractor found no readable text layer. We therefore checked the content in the authors' HTML version "Bilateral Filtering for Gray and Color Images" (https://homepages.inf.ed.ac.uk/rbf/CVonline/LOCAL_COPIES/MANDUCHI1/Bilateral_Filtering.html). This is the page linked from OpenCV's `bilateralFilter` documentation (V12).
+  * **Action for the student:** before final citation, open the PDF and confirm that the quotes also appear there, or cite the HTML page separately.
+* **Quotes we rely on (HTML version):**
+  * "Gaussian low-pass filtering computes a weighted average of pixel values in the neighborhood, in which the weights decrease with distance from the neighborhood center."
+  * "The assumption of slow spatial variations fails at edges, which are consequently blurred by linear low-pass filtering."
+  * "Bilateral filtering is a simple, non-iterative scheme for edge-preserving smoothing."
+  * "It replaces the pixel value at x with an average of similar and nearby pixel values."
+  * "In smooth regions, pixel values in a small neighborhood are similar to each other, and the bilateral filter acts essentially as a standard domain filter, averaging away the small, weakly correlated differences between pixel values caused by noise."
+  * At a sharp boundary, "the filter replaces the bright pixel at the center by an average of the bright pixels in its vicinity, and essentially ignores the dark pixels."
+* **Supports:** the idea of the bilateral filter (closeness × similarity), why linear filters blur edges, why bilateral filtering preserves edges.
+* **Cite in:** 3 Methods (3.4.4), 4 Results (discussion of the bilateral results).
 
 ---
 
@@ -164,6 +214,4 @@ the paper text, so we must not cite these for any specific claim yet.
 | Candidate | Would support | Report section | When / status |
 |---|---|---|---|
 | R. C. Gonzalez and R. E. Woods, *Digital Image Processing*, Pearson (4th ed.) | Noise models, spatial filters | 1, 3 | Contents not accessible online. Verify from a library copy if the professor prefers a textbook. |
-| C. Tomasi and R. Manduchi, bilateral filtering paper, ICCV 1998 | Bilateral filter | 3 | Stage 4 |
-| OpenCV documentation: `blur`, `GaussianBlur`, `medianBlur`, `bilateralFilter` | Filter implementation and parameters | 3 | Stage 4 |
 | MATLAB `imnoise` documentation (how another tool defines speckle) | Comparison of speckle conventions | 3 | mathworks.com returned HTTP 403 to automated access; not verified |

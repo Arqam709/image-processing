@@ -1,6 +1,6 @@
 # Report Notes
 
-_Last updated: 2026-11-16 (after Stage 3)_
+_Last updated: 2026-11-16 (after Stage 4)_
 
 These are **preparation notes**, not the report. Each section separates:
 
@@ -85,7 +85,8 @@ Page limit, deadline, number of figures, font requirements for the student's tex
 * **Why it is a problem for later processing.** Fan et al. [V8]: "With the presence of noise, possible subsequent image processing tasks, such as video processing, image analysis, and tracking, are adversely affected. Therefore, image denoising plays an important role in modern image processing systems."
 * **Impulse (salt-and-pepper) noise.** Ma and Nie [V9]: "Digital images can be corrupted by impulse noise due to bit errors in the process of image acquisition and transmission." It "can not only significantly deteriorate the quality of an image, but also bring some difficulty to the subsequent image analysis such as image segmentation, edge detection and classification."
 * **Speckle noise.** Yu et al. [V10]: "ultrasound images are inevitably corrupted by speckle noise due to the coherent imaging mechanism", which "reduces the sharpness of image details and complicates the diagnosis". Denoising as "a pre-processing step … will also benefit image post-processing tasks such as image segmentation, classification and registration."
-* **The core difficulty of denoising.** Fan et al. [V8]: "since noise, edge, and texture are high frequency components, it is difficult to distinguish them in the process of denoising and the denoised images could inevitably lose some details." Our noisy images will let us test this trade-off in Stage 4.
+* **The core difficulty of denoising.** Fan et al. [V8]: "since noise, edge, and texture are high frequency components, it is difficult to distinguish them in the process of denoising and the denoised images could inevitably lose some details." Also: "Normally, spatial filters eliminate noise to a reasonable extent but at the cost of image blurring, which in turn loses sharp edges." The Stage 4 results show exactly this trade-off on our test image (§4.2).
+* **What a good denoiser should do.** Fan et al. [V8]: "flat areas should be smooth, edges should be protected without blurring, textures should be preserved, and new artifacts should not be generated." This list matches the regions of our synthetic image (flat patch, square/circle edges, line pattern).
 
 ### Proposed (still to write)
 * Project objectives (from `project_overview.md`).
@@ -123,6 +124,13 @@ How D1 is used in Stage 3 (confirmed by the actual runs):
 * The dark square (value 20) next to the bright circle (value 235) makes the brightness dependence of speckle noise easy to see.
 * The values 20 and 240 lie close to the limits 0 and 255, so strong Gaussian/speckle noise is clipped there. This is visible in the results (see §4.1).
 * Derived noisy images are stored in `results/noisy/` with names like `synthetic_test_image__gaussian_sigma25__seed42.png`. They can be regenerated exactly, so Git ignores them.
+
+How D1 is used in Stage 4 (confirmed by the actual runs):
+* The Stage 4 demo also measures MSE inside two regions of D1. Each is 8,455 px.
+  * The **flat patch** (rows 141–229, columns 20–114): noise removal without edges.
+  * The **line block** (rows 141–229, columns 141–235; 24 one-pixel lines): loss of fine detail.
+  * The demo checks that these regions still contain exactly the expected values (128, or 40 and 240).
+* The 1-pixel lines turned out to dominate the whole-image MSE of the smoothing filters (§4.2). This is an important property of D1 that must be stated whenever its filter results are reported.
 
 ### Proposed
 **Image D2: student's own photograph** (not yet provided). Record these fields:
@@ -277,8 +285,97 @@ Template instruction: "Please use draw.io for ploting" (block diagram, see 3.5).
 * **Implementation:** `rng.normal(0, sqrt(variance), shape)`, multiplied by the float64 original, added to it, then rounded, clipped and converted.
 * **Limitations:** this is a *simplified* multiplicative model, **not** a complete physical model of radar or ultrasound speckle. Real speckle comes from coherent imaging and is described by other distributions (e.g. Fisher–Tippett or Gamma, as noted in [V10]), may use γ ≠ 1 [V10], and is spatially correlated. Our noise is independent from pixel to pixel.
 
-### 3.4 Filters (Stage 4)
-* **Proposed:** mean (`cv2.blur`), Gaussian (`cv2.GaussianBlur`), median (`cv2.medianBlur`), bilateral (`cv2.bilateralFilter`).
+### 3.4 Noise-removal filters (Stage 4)
+
+**Implemented:** `src/filters.py`. Tests: `tests/test_filters.py` (43 tests). Demo: `demos/demo_filters.py`.
+
+All four are **spatial filters**: a small window moves over the image, and each output pixel is computed from the pixels in the window around it. Lecture 1 (PDF p. 21) describes this as "A small filter moves across the image. It uses neighboring pixels to smooth, sharpen, or detect patterns." Fan et al. [V8] divide spatial filters into linear filters (mean, Gaussian) and non-linear filters (median, bilateral).
+
+#### 3.4.0 Rules shared by all four filter functions (implemented and tested)
+* **Input:** a valid 2-D `uint8` image, checked with Stage 1's `validate_grayscale_image`.
+* **Output:** a **new** `uint8` array of the same shape. The input is never modified (tested, also for kernel size 1, where the result must still be a separate copy).
+* **Wrappers, not reimplementations:** each function validates its parameters and then calls one OpenCV function [V12]. A test compares every wrapper with a direct OpenCV call and requires identical output.
+* **Window sizes:** odd integers (3 = 3×3 window), so the window has a centre pixel.
+  * The mean, Gaussian and median `kernel_size` must be ≥ 1, where 1 means "no change".
+  * The bilateral `diameter` must be ≥ 3.
+  * Booleans and floats are rejected.
+  * Note: OpenCV's `cv2.blur` would silently accept an even size (observed), so we check ourselves.
+* **Border handling (what happens at the image edge):** part of the window lies outside the image, so the missing pixels must be invented.
+  * Mean, Gaussian and bilateral use **`BORDER_REFLECT_101`**: mirror the image without repeating the edge pixel ("gfedcb|abcdefgh|gfedcba" [V12]). This is OpenCV's default; we pass it explicitly.
+  * The median filter has no border option. OpenCV "uses #BORDER_REPLICATE internally" [V12]: the edge pixel is repeated ("aaaaaa|abcdefgh").
+  * Both behaviours are confirmed by known-answer tests on tiny images.
+* **Deterministic:** the same input and settings always give the same output (tested). No randomness is involved.
+
+#### 3.4.1 Mean (box) filter: `apply_mean_filter(image, kernel_size=3)` → `cv2.blur`
+* **Idea (simple English):** replace every pixel by the **average** of the pixels in its window.
+* **Formula:** g(x, y) = (1 / k²) · Σ f(x + i, y + j) over the k × k window; every weight = 1/k² [V12: "normalized box filter"].
+* **Parameter:** `kernel_size` k. Larger k = more smoothing and more blur.
+* **Advantages:** simplest filter; fast; very effective against small random noise in flat regions.
+  * Theory (our derivation from basic statistics, for independent noise): averaging 9 values divides the noise variance by 9.
+* **Disadvantages:** blurs edges and thin lines, because pixels from both sides of an edge are averaged. Fan et al. [V8]: mean filtering "has been adopted for Gaussian noise reduction, however, it can over-smooth images with high noise". An impulse (255 or 0) is not removed but spread into a gray 3×3 blob.
+* **Expected behaviour:** good for Gaussian noise in flat areas, poor for salt-and-pepper and for fine detail.
+* **Tested known answers:**
+  * one pixel of 90 among zeros → 10 in its 3×3 neighbourhood (90/9)
+  * step edge 30 | 120 → 60 and 90 next to the edge
+  * corner pixel → 10 with REFLECT_101 (REPLICATE would give 40)
+
+#### 3.4.2 Gaussian filter: `apply_gaussian_filter(image, kernel_size=3, sigma=0)` → `cv2.GaussianBlur`
+* **Idea:** a **weighted** average. Pixels near the centre count more than pixels far away; the weights follow a bell curve. Tomasi and Manduchi [V13]: "Gaussian low-pass filtering computes a weighted average of pixel values in the neighborhood, in which the weights decrease with distance from the neighborhood center."
+* **Weights:** G_i ∝ exp(−(i − (k−1)/2)² / (2σ²)), normalised to sum to 1 [V12]. The 2-D weights are the product of a horizontal and a vertical 1-D kernel.
+* **Parameters:**
+  * `kernel_size` k: the window size.
+  * `sigma` σ, in pixels: the width of the bell. Larger σ = stronger smoothing (tested).
+  * `sigma = 0`: OpenCV chooses σ from k [V12]. For k = 3 the OpenCV source uses the fixed weights **[1/4, 1/2, 1/4]**, so the 3×3 weights are 1/4 (centre), 1/8 (direct neighbours) and 1/16 (diagonal neighbours). We confirmed this with a test (an impulse of 160 gives exactly 40 / 20 / 10).
+  * We pass the same σ for x and y, as OpenCV recommends [V12].
+* **Advantages:** smoother, more natural blur than the mean filter; it blurs edges a little less at the same kernel size, because the centre pixel has more weight (tested on a step edge: 53 instead of 60 next to the edge).
+* **Disadvantages:** still a linear filter, so it still blurs edges and lines [V13: edges "are consequently blurred by linear low-pass filtering"]. With k = 3 it removes less noise than the mean filter.
+  * Theory: the noise variance is multiplied by Σw² = 0.375² ≈ 0.141 instead of 1/9 ≈ 0.111.
+* **Expected behaviour:** like the mean filter, slightly less smoothing and slightly less blur.
+
+#### 3.4.3 Median filter: `apply_median_filter(image, kernel_size=3)` → `cv2.medianBlur`
+* **Idea:** sort the pixels in the window and take the **middle** value. Ma and Nie [V9]: "The standard median filter uniformly replaces the gray level of each noise corrupted pixel by the median gray level of its neighborhood pixels."
+* **Parameter:** `kernel_size` (odd ≥ 1). For uint8 images every odd size is supported; sizes above 5 work only for 8-bit images [V12], which is all we accept.
+* **Advantages:**
+  * It is the classic answer to salt-and-pepper noise: "one of the most popular nonlinear filters for the removal of salt-and-pepper noise" [V9].
+  * An isolated 0 or 255 is an extreme value, so it is never the middle value. It is dropped, not averaged in (tested: an isolated salt and pepper pixel disappear completely).
+  * It keeps straight step edges perfectly sharp (tested).
+  * It never creates new gray values: the output contains only values from the window (tested).
+* **Disadvantages:**
+  * It **erases details thinner than half the window**: a 1-pixel line is only 3 of 9 values in a 3×3 window, so the median ignores it (tested).
+  * Ma and Nie [V9]: effective "in the case of low noise density"; for high densities larger windows are needed, which "leads edges and details to be blurred".
+  * Expected to be less effective than averaging for Gaussian noise. Our reasoning, not from a cited source: averaging combines all 9 values, while the median keeps only the middle one. This is consistent with the flat patch in §4.2 (107.46 vs 80.14).
+* **Expected behaviour:** excellent for salt-and-pepper in flat areas; destroys thin lines; moderate for Gaussian noise.
+
+#### 3.4.4 Bilateral filter: `apply_bilateral_filter(image, diameter=5, sigma_color=50, sigma_space=50)` → `cv2.bilateralFilter`
+* **Idea:** an average of pixels that are **near and similar**. Tomasi and Manduchi [V13]: "It replaces the pixel value at x with an average of similar and nearby pixel values." Each neighbour gets two weights multiplied together:
+  * a **closeness** weight, which falls with distance (like the Gaussian filter, controlled by `sigma_space`)
+  * a **similarity** weight, which falls with the difference in intensity (controlled by `sigma_color`)
+* **Why it keeps edges:** on the bright side of an edge, the dark pixels are very different, so they get almost no weight. "The filter replaces the bright pixel at the center by an average of the bright pixels in its vicinity, and essentially ignores the dark pixels" [V13]. In flat regions all neighbours are similar, so it "acts essentially as a standard domain filter, averaging away the small … differences … caused by noise" [V13].
+* **Parameters [V12]:**
+  * `diameter` d: the size of the square neighbourhood. In OpenCV the radius = d // 2, at least 1 (source code), so even values and 1 or 2 do not mean what they say. We accept only odd d ≥ 3.
+  * `sigma_color`, in intensity levels: neighbours that differ by much more than this are ignored. Larger = more mixing.
+  * `sigma_space`, in pixels: how fast the weight falls with distance. Larger = far neighbours count more.
+  * OpenCV silently replaces sigmas ≤ 0 by 1 (observed), so we require > 0.
+* **Our setting d = 5, sigma_color = sigma_space = 50:**
+  * OpenCV: "it is recommended to use d=5 for real-time applications". "For simplicity, you can set the 2 sigma values to be the same". Values "< 10" have little effect, values "> 150" make the image "cartoonish" [V12].
+  * 50 is a middle value between those limits. It was **not** tuned for the best PSNR.
+* **Advantages:** "edge-preserving, and noise-reducing" [V8]; keeps edges and thin lines.
+  * Tested: a 50 | 200 step edge is unchanged with sigma_color = 10, but blurred with sigma_color = 1000.
+* **Disadvantages:**
+  * Slow: "very slow compared to most filters" [V12]; "One issue concerning the bilateral filter is its efficiency" [V8].
+  * It cannot tell an impulse from an edge. A salt pixel differs from its neighbours by more than sigma_color, so the neighbours get little weight and the impulse largely **survives** (our expectation from the formula, confirmed in §4.2).
+  * More parameters to choose.
+* **Expected behaviour:** good for Gaussian noise while keeping edges and lines; weak against salt-and-pepper.
+
+#### 3.4.5 Summary table (theory and documentation; measured results are in §4.2)
+| Filter | Type | Main parameter(s) | Expected strength | Expected weakness |
+|---|---|---|---|---|
+| Mean | linear | kernel_size | Gaussian noise in flat areas | blurs edges and lines; spreads impulses |
+| Gaussian | linear | kernel_size, sigma | Gaussian noise, slightly less blur than mean | still blurs edges and lines |
+| Median | non-linear | kernel_size | salt-and-pepper noise; keeps step edges | erases thin lines and fine detail |
+| Bilateral | non-linear | diameter, sigma_color, sigma_space | Gaussian noise while keeping edges and lines | slow; impulses survive |
+
+**Limitations of the filter module:** grayscale uint8 only; square windows only (OpenCV also allows rectangles); one border mode per filter, not configurable; no adaptive or switching median filters (those are mentioned in [V9] but out of scope).
 
 ### 3.5 Block diagram workflow (for draw.io, Stage 8)
 Status of each box: [I] = implemented, [P] = proposed. The template's example diagram uses dashed rounded group boxes, icons and arrows, with the caption "Figure1: Block diagram of the proposed work".
@@ -290,14 +387,15 @@ Status of each box: [I] = implemented, [P] = proposed. The template's example di
       │  add noise (Gaussian σ / salt-and-pepper amount /    │ reference
       │  speckle variance, fixed seed)            [I]        │
       ▼                                                     │
-[I] Noisy image  ──► [P] Filter (mean / Gaussian / median / bilateral, parameters)
+[I] Noisy image  ──► [I] Filter (mean / Gaussian / median / bilateral, parameters)
       │                         │
       │ baseline                ▼
-      │                  [P] Filtered image
+      │                  [I] Filtered image
       ▼                         ▼
 [I] Metrics vs. clean image: MSE, PSNR  ◄───────────────────┘
       ▼
-[P] Results table (CSV) + comparison figures (PNG)
+[I] Results table (CSV) + comparison figure (PNG) for the Stage 4 demo
+[P] Full results table and figures for all settings (Stages 5–6)
 ```
 
 ---
@@ -364,19 +462,97 @@ nothing here says anything about noise removal. These values are the
 
 **Limitations of these results:** one synthetic image only, one seed (42), and no real photograph yet. The numbers describe this image and seed. Other images or seeds will give somewhat different values. PSNR comparisons across noise types should be read together with the images (observation 4).
 
-### 4.2 Noise removal experiments
-* **Not yet collected.** Requires Stage 4 (filters) and Stage 6 (experiment runner). Each filter will be applied to the saved noisy baselines (groups G001–G009), and its PSNR compared with the baseline PSNR above.
+### 4.2 Noise removal results (Stage 4): first comparison, one setting per filter
+**Setup:**
+* Image D1, seed 42, two noise cases. Each case uses **one** noisy image, and all four filters are applied to that same array.
+  * G002: Gaussian σ = 25, baseline E002
+  * G005: salt-and-pepper amount = 0.05, baseline E005
+* The program confirmed that both noisy images are identical to the saved Stage 3 files.
+* Filters: mean k = 3; Gaussian k = 3, σ = 0 (auto); median k = 3; bilateral d = 5, σ_color = σ_space = 50.
+* Command: `python -m demos.demo_filters --save-figure --save-outputs`, run on 2026-11-16 with Python 3.12.10, NumPy 2.5.5 and OpenCV 5.0.0.
+* Source of every number: `results/tables/stage4_filter_results.csv` and the demo output (log IDs E010–E017, FC001–FC004).
+
+**Whole-image results**
+| ID | Noise | Filter | MSE | PSNR (dB) | ΔPSNR vs noisy (dB) |
+|---|---|---|---|---|---|
+| E002 | Gaussian σ = 25 | none (noisy) | 577.99 | 20.51 | – |
+| E010 | Gaussian σ = 25 | mean k3 | 945.68 | 18.37 | −2.14 |
+| E011 | Gaussian σ = 25 | Gaussian k3 | 588.33 | 20.43 | −0.08 |
+| E012 | Gaussian σ = 25 | median k3 | 1216.98 | 17.28 | −3.23 |
+| E013 | Gaussian σ = 25 | bilateral d5/50/50 | 87.85 | 28.69 | **+8.18** |
+| E005 | Salt-and-pepper 0.05 | none (noisy) | 1058.04 | 17.89 | – |
+| E014 | Salt-and-pepper 0.05 | mean k3 | 1007.24 | 18.10 | +0.21 |
+| E015 | Salt-and-pepper 0.05 | Gaussian k3 | 672.05 | 19.86 | **+1.97** |
+| E016 | Salt-and-pepper 0.05 | median k3 | 1271.09 | 17.09 | −0.80 |
+| E017 | Salt-and-pepper 0.05 | bilateral d5/50/50 | 861.12 | 18.78 | +0.89 |
+
+**MSE by region.** Both regions are 8,455 px.
+* **Flat patch:** the constant 128 area, with no edges inside it.
+* **Line block:** the 1-pixel lines, 12.9% of the image.
+
+| Filter | Gaussian σ = 25: flat patch | line block | S&P 0.05: flat patch | line block |
+|---|---|---|---|---|
+| none (noisy) | 629.93 | 520.13 | 830.67 | 1181.32 |
+| mean k3 | 80.14 | 6713.03 | 102.34 | 6775.90 |
+| Gaussian k3 | 94.16 | 3889.52 | 125.27 | 4039.72 |
+| median k3 | 107.46 | 8664.46 | **2.66** | 9826.72 |
+| bilateral | 88.01 | **119.86** | 458.25 | 998.52 |
+
+**Filters applied to the clean image (no noise)**
+| ID | Filter | MSE | PSNR (dB) | Changed px | Line-block MSE |
+|---|---|---|---|---|---|
+| FC001 | mean k3 | 879.34 | 18.69 | 9,378 | 6657.56 |
+| FC002 | Gaussian k3 | 497.07 | 21.17 | 9,114 | 3758.35 |
+| FC003 | median k3 | 1263.88 | 17.11 | 2,563 | 9793.13 |
+| FC004 | bilateral | 3.44 | 42.76 | 21,041 | 4.00 |
+
+**Figure:** `results/figures/stage4_filter_comparison.png`, a strong candidate for the report.
+
+**Observations (based only on these runs):**
+1. **Not every filter improves the image.**
+   * With Gaussian noise, three of four filters gave a *lower* whole-image PSNR than the noisy image: mean −2.14 dB, Gaussian −0.08 dB, median −3.23 dB.
+   * With salt-and-pepper, the median filter gave −0.80 dB.
+   * Only the bilateral filter improved both cases.
+2. **The line block decides the whole-image ranking.** On the clean image, 97.7% (mean), 97.5% (Gaussian) and ≈ 100% (median) of the filtering error comes from the line block, which is only 12.9% of the pixels.
+   * A 3×3 window always contains a line pixel next to darker pixels, so mean and Gaussian smear the lines and the median removes them completely.
+   * In the figure, the median-filtered line block is flat gray in both rows.
+   * This matches the trade-off in [V8]: spatial filters remove noise "at the cost of image blurring".
+3. **In the flat patch, every filter removes most of the noise**, which is the behaviour the theory predicts.
+   * Gaussian noise: mean 80.14 (12.7% of the noisy 629.93), bilateral 88.01 (14.0%), Gaussian 94.16 (14.9%), median 107.46 (17.1%).
+   * Theory for independent noise: mean 1/9 = 11.1%, Gaussian k3 Σw² = 14.1%.
+   * The measured ratios are slightly higher. Possible reasons, not separately measured: the outermost patch pixels also average in neighbouring gradient values, and rounding and clipping play a part.
+4. **The median filter is by far the best against salt-and-pepper where there is no fine detail.** In the flat patch: 830.67 → 2.66 (−99.7%), against mean −87.7% and Gaussian −84.9%.
+   * In the figure the median result looks almost perfectly clean except for the line block.
+   * This agrees with [V9] ("one of the most popular nonlinear filters for the removal of salt-and-pepper noise").
+5. **Mean and Gaussian do not remove impulses; they spread them.** In the figure, each salt or pepper pixel becomes a faint gray 3×3 blob.
+6. **The bilateral filter keeps edges and lines, but not against impulses.**
+   * Gaussian noise: the best result in the whole image (28.69 dB) and the only filter that also improved the line block (520.13 → 119.86).
+   * On the clean image it changed almost nothing (MSE 3.44).
+   * Salt-and-pepper: the flat-patch error was only halved (830.67 → 458.25), and in the figure most impulses are still visible. An impulse differs from its neighbours by far more than sigma_color = 50, so it is treated like an edge and kept. This matches the expectation in §3.4.4.
+7. **PSNR again depends on image content.** The Gaussian filter has the best whole-image PSNR for salt-and-pepper (+1.97 dB), yet the median result clearly looks better almost everywhere. On an image without 1-pixel lines, the ranking would very likely be different (an expectation, to be tested with the student's photo in Stage 6).
+
+**Limitations of these results:**
+* One synthetic image, one seed, two noise cases, and one parameter setting per filter (kernel 3, bilateral 5/50/50).
+* The bilateral parameters were not tuned. The line pattern (period 4 px) is a deliberately hard case for 3×3 windows.
+* No conclusions about other kernel sizes, noise levels or real photographs can be drawn yet. These need the experiment runner (Stage 6).
 
 ## 5. Conclusion
 Template instruction: "Summarized the whole project".
 * **Not yet collected.** Write it after Stage 7.
-* Achievements so far (engineering, not final conclusions): reliable image loading with validation, Unicode path support, verified MSE/PSNR implementation, three reproducible noise models, 101 passing unit tests.
-* Findings so far that may feed the conclusion (from §4.0–4.1, not about filters): PSNR does not capture the *type* of degradation (salt-and-pepper 10% and Gaussian σ = 50 have equal PSNR but look very different); clipping makes strong noise measure lower than its model predicts.
+* **Achievements so far (engineering, not final conclusions):**
+  * reliable image loading with validation and Unicode path support
+  * a verified MSE/PSNR implementation
+  * three reproducible noise models
+  * four validated filter wrappers
+  * 144 passing unit tests
+* **Findings so far that may feed the conclusion:**
+  * From §4.0–4.1: PSNR does not capture the *type* of degradation (salt-and-pepper 10% and Gaussian σ = 50 have equal PSNR but look very different). Clipping makes strong noise measure lower than its model predicts.
+  * From §4.2, preliminary, one setting per filter: the median filter almost completely removes salt-and-pepper noise in flat regions but erases 1-pixel lines. The bilateral filter preserves edges and lines and works well for Gaussian noise but leaves impulses. Smoothing filters can *lower* the whole-image PSNR when the image contains fine detail.
 
 ## References
-See `references.md`. Style: IEEE numbered (confirmed by the template's example reference). Template: "Please put a least five Reference". **11 sources are verified so far (V1–V11): 4 peer-reviewed papers (V5, V8, V9, V10) and 7 official technical documentation / source-code references.**
+See `references.md`. Style: IEEE numbered (confirmed by the template's example reference). Template: "Please put a least five Reference". **13 sources are verified so far (V1–V13): 5 peer-reviewed papers (V5, V8, V9, V10, V13) and 8 official technical documentation / source-code references.**
 
 ## Index (source code)
 Template: "Please put your source code here if you it is applicable".
-Current source files: `src/image_io.py`, `src/synthetic_image.py`, `src/metrics.py`, `src/noise.py`, `demos/demo_image_loading.py`, `demos/demo_metrics.py`, `demos/demo_noise.py`.
+Current source files: `src/image_io.py`, `src/synthetic_image.py`, `src/metrics.py`, `src/noise.py`, `src/filters.py`, `demos/demo_image_loading.py`, `demos/demo_metrics.py`, `demos/demo_noise.py`, `demos/demo_filters.py`.
 Final listing to be prepared at the end.

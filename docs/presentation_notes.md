@@ -1,6 +1,6 @@
 # Presentation Notes (simple English)
 
-_Last updated: 2026-11-16 (after Stage 3)_
+_Last updated: 2026-11-16 (after Stage 4)_
 
 ## What the project does (planned, in one breath)
 "We take a clean picture, add a known amount of noise to it on purpose, try
@@ -59,7 +59,7 @@ check the file's fingerprint (SHA-256 hash) is unchanged after loading.
 
 **How do you know the code works?**
 32 automated unit tests for Stage 1 (Python `unittest`), run on 2026-11-16, all passing
-(63 in total after Stage 2, 101 after Stage 3).
+(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4).
 They check correct pixel values, colour-to-gray conversion, and every error
 case: missing file, empty file, corrupted file, wrong type, and so on.
 
@@ -185,6 +185,69 @@ image is and can later measure how well each filter repairs it."
 
 ---
 
+## Stage 4: removing noise with filters
+
+**One-sentence summary:** "We take one noisy image, clean it with four
+different filters, and measure which result is closest to the original, both
+for the whole image and for separate regions."
+
+**What is a filter here?** A small window (3×3 = 9 pixels) slides over the image.
+For every position, the filter looks at the 9 pixels and computes one new
+value for the centre pixel (lecture 1, PDF p. 21).
+
+**The four filters in one line each**
+* **Mean:** take the average of the 9 pixels. Simple; it smooths noise but also smooths edges.
+* **Gaussian:** a weighted average; the centre pixel counts most (1/4), its 4 direct neighbours 1/8 each, the 4 corners 1/16 each.
+* **Median:** sort the 9 values and take the middle one. An extreme value (0 or 255) is never in the middle, so it just disappears.
+* **Bilateral:** average only the neighbours that are close **and** have a similar brightness. Pixels on the other side of an edge are ignored, so edges stay sharp.
+
+**Board example for the median (easy to show):**
+window = 100, 100, 100, 100, **255**, 100, 100, 100, 100
+* sorted: 100 100 100 100 **100** 100 100 100 255, so the median is **100**. The salt pixel is gone.
+* the mean of the same window is (8·100 + 255)/9 = 117.2. The salt pixel was only spread out.
+
+**Our settings and why**
+* Kernel size 3 for mean, Gaussian and median: the smallest window that smooths, and the same for all three, so the comparison is fair.
+* Gaussian sigma = 0: OpenCV picks it from the kernel size. For size 3 it uses the weights 1/4, 1/2, 1/4 (we checked OpenCV's source code and wrote a test).
+* Bilateral d = 5, sigmaColor = sigmaSpace = 50. OpenCV's documentation suggests d = 5 for fast filtering and equal sigmas, and says values below 10 do little while values above 150 look "cartoonish". 50 is in between. **We did not tune it.**
+
+**What is "border handling"?** At the image edge, part of the window is outside the image.
+* Mean, Gaussian and bilateral **mirror** the image (OpenCV's default; we set it explicitly).
+* The median always **repeats** the edge pixel (fixed inside OpenCV).
+* We have tests for both.
+
+**Our actual results (seed 42, synthetic image)**
+| Noise | Noisy | Mean | Gaussian | Median | Bilateral |
+|---|---|---|---|---|---|
+| Gaussian σ = 25 | 20.51 dB | 18.37 | 20.43 | 17.28 | **28.69** |
+| Salt-and-pepper 5% | 17.89 dB | 18.10 | **19.86** | 17.09 | 18.78 |
+
+**The surprise, and how to explain it (important!)**
+* Several filters made the whole-image PSNR **worse** than the noisy image. Even the median, the textbook filter for salt-and-pepper, scored −0.80 dB.
+* Reason: our test image has a block of 1-pixel-wide lines. A 3×3 window sees a line as only 3 of 9 pixels.
+  * The median throws the lines away completely.
+  * Mean and Gaussian smear them.
+* Proof: applied to the **clean** image, almost all of the median's error (≈ 100%) comes from that one block, which is only 12.9% of the image.
+* In the flat region (no detail), the median removed **99.7%** of the salt-and-pepper error (830.67 → 2.66), the best of all filters.
+* Lesson: **noise removal and detail preservation pull in opposite directions.** A single PSNR number for the whole image mixes them up. That is why we also measure regions.
+
+**What each filter is good and bad at (our measurements)**
+* Mean and Gaussian: reduce Gaussian noise in flat areas to about 13–15% of the error, but blur lines and spread impulses into gray blobs.
+* Median: perfect against isolated salt-and-pepper pixels, keeps straight edges sharp, but erases thin lines.
+* Bilateral: best for Gaussian noise (+8.18 dB) and keeps the lines, but leaves most salt-and-pepper pixels. A white dot looks to the filter like a tiny "edge", so it keeps it.
+
+**Likely questions about Stage 4**
+* *Why did you use OpenCV instead of writing the filters yourself?* OpenCV's versions are tested, fast and standard. Our code validates the inputs, chooses explicit settings, and a test checks that our result equals the direct OpenCV call. Writing our own would add bugs without teaching more about the results.
+* *Why must the kernel size be odd?* So the window has a centre pixel: 3 = 1 left + centre + 1 right.
+* *Why is the median filter non-linear?* Sorting is not a weighted sum. For example, median(a + b) is not median(a) + median(b).
+* *Why does the mean filter not remove salt-and-pepper?* It averages the 255 with its neighbours, so the error is spread over 9 pixels instead of removed.
+* *Why apply all filters to the same noisy image?* Otherwise the random noise would differ between filters, and we could not tell whether a difference comes from the filter or from the noise. The program checks that no filter changed the noisy image.
+* *Is the bilateral filter always the best?* No. It was the worst of the four in the flat region with salt-and-pepper (458.25 vs 2.66 for the median).
+* *Would bigger kernels be better?* More noise removal but more blur. We have not measured that yet; it is planned for the experiment runner (Stage 6).
+* *Would the results be the same on a real photo?* Probably not exactly, because our image has an unusually hard line pattern. We will test the student's own photo later.
+
+---
+
 ## Questions the professor might ask (answers grow with each stage)
 * *What is a "full-reference" metric?* One that needs the original clean image, like MSE and PSNR.
 * *If PSNR is just a rescaled MSE, why report both?* PSNR in dB is the common convention in image processing papers and is easier to read. MSE is easier to understand and calculate by hand.
@@ -194,4 +257,5 @@ image is and can later measure how well each filter repairs it."
 * *What is a pixel?* The smallest addressable element of a digital image (lecture 1).
 * *What is the difference between sampling and quantization?* Sampling is how many pixels; quantization is how many intensity levels (8-bit gives 256 levels).
 * *Why grayscale first?* One value per pixel makes the algorithms easier to understand and compare. Colour may come later.
-* _(To add in later stages: noise types, filters, MSE/PSNR, results.)_
+* *What is a linear filter?* One where the output is a fixed weighted sum of the inputs (mean, Gaussian). Median and bilateral are non-linear [V8].
+* _(To add in later stages: full results with several settings, comparison figures, the photo.)_
