@@ -9,10 +9,14 @@ algorithms of its own:
   in memory instead of on a file path. Nothing is written to disk.
 * Validation of the result uses src.image_io.validate_grayscale_image.
 
-Stage 5A covers only the upload step. Noise, filters and metrics will be
-connected in Stages 5B-5D by calling the existing functions in src/.
+* Noise is added by calling the existing functions in src/noise.py
+  (Stage 5B). This module only chooses WHICH function to call.
+
+Filters and metrics will be connected in Stages 5C-5D in the same way.
 """
 
+import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePath
 
@@ -20,6 +24,7 @@ import cv2
 import numpy as np
 
 from src.image_io import validate_grayscale_image
+from src.noise import add_gaussian_noise, add_salt_and_pepper_noise, add_speckle_noise
 
 # --------------------------------------------------------------------------
 # Upload rules
@@ -207,8 +212,183 @@ def load_uploaded_image(file_name, data, max_file_bytes=MAX_FILE_SIZE_BYTES, max
 
 
 # --------------------------------------------------------------------------
-# Small display helpers
+# Noise (Stage 5B): choose and call the existing functions in src/noise.py
 # --------------------------------------------------------------------------
+DEFAULT_SEED = 42  # the same seed as every Stage 3 and Stage 4 experiment
+
+
+@dataclass(frozen=True)
+class NoiseOption:
+    """One noise type: which src/noise.py function to call, and its slider settings.
+
+    The defaults are the Stage 3 baselines (E002, E005, E008). The slider
+    ranges cover the Stage 3 values (and more) and stay inside the
+    rules of src/noise.py.
+    """
+
+    label: str
+    function: Callable
+    parameter: str  # the name of the strength argument in src/noise.py
+    default: float
+    minimum: float
+    maximum: float
+    step: float
+    explanation: str
+
+
+NOISE_OPTIONS = {
+    "gaussian": NoiseOption(
+        label="Gaussian Noise",
+        function=add_gaussian_noise,
+        parameter="sigma",
+        default=25,
+        minimum=0,
+        maximum=100,
+        step=1,
+        explanation=(
+            "Gaussian noise adds random brightness changes to pixels. "
+            "A larger sigma usually creates stronger noise."
+        ),
+    ),
+    "salt_and_pepper": NoiseOption(
+        label="Salt-and-Pepper Noise",
+        function=add_salt_and_pepper_noise,
+        parameter="amount",
+        default=0.05,
+        minimum=0.0,
+        maximum=0.5,
+        step=0.01,
+        explanation=(
+            "Salt-and-Pepper noise randomly changes some pixels to black or white. "
+            "A larger amount affects more pixels."
+        ),
+    ),
+    "speckle": NoiseOption(
+        label="Speckle Noise",
+        function=add_speckle_noise,
+        parameter="variance",
+        default=0.04,
+        minimum=0.0,
+        maximum=0.25,
+        step=0.01,
+        explanation=(
+            "Speckle noise changes pixel brightness by an amount related to the original "
+            "brightness. Larger variance usually produces stronger noise."
+        ),
+    ),
+}
+NOISE_TYPES = tuple(NOISE_OPTIONS)  # ("gaussian", "salt_and_pepper", "speckle")
+
+
+def get_noise_option(noise_type):
+    """Return the NoiseOption for a noise type name, or raise a clear error."""
+    if not isinstance(noise_type, str):
+        raise TypeError(f"noise_type must be a string, got {type(noise_type).__name__}.")
+    if noise_type not in NOISE_OPTIONS:
+        raise ValueError(f"Unknown noise type '{noise_type}'. Choose one of: {', '.join(NOISE_TYPES)}.")
+    return NOISE_OPTIONS[noise_type]
+
+
+def make_noisy_image(reference_image, noise_type, strength, seed):
+    """Add noise to a copy of the clean reference image and return the noisy image.
+
+    This only selects and calls the existing function from src/noise.py:
+        "gaussian"        -> add_gaussian_noise(image, sigma, seed)
+        "salt_and_pepper" -> add_salt_and_pepper_noise(image, amount, seed)
+        "speckle"         -> add_speckle_noise(image, variance, seed)
+    The strength and seed are passed on unchanged, and src/noise.py checks them
+    (for example: no negative values, amount at most 1, seed a whole number >= 0).
+
+    One extra rule for the app: a seed is required (None is refused), because
+    without a seed the noise would change every time the page reruns.
+
+    The reference image is never changed (src/noise.py always works on a copy).
+    The result is a new uint8 image with the same shape, marked read-only so the
+    same noisy image can later be given to every filter without being changed.
+    """
+    option = get_noise_option(noise_type)
+    if seed is None:
+        raise ValueError("A seed is required, so that the same settings always give the same noise.")
+    noisy = option.function(reference_image, strength, seed=seed)
+    return _read_only(noisy)
+
+
+def describe_noise(noise_type, strength):
+    """A short label for the noisy image, e.g. 'Gaussian Noise — σ = 25'."""
+    option = get_noise_option(noise_type)
+    if noise_type == "gaussian":
+        return f"{option.label} — σ = {strength:g}"
+    if noise_type == "salt_and_pepper":
+        return f"{option.label} — {strength * 100:g}% of pixels"
+    return f"{option.label} — variance = {strength:g}"
+
+
+def pixel_fingerprint(image):
+    """A short code computed from every pixel value (the first 12 characters of SHA-256).
+
+    Two images with the same shape and identical pixels always get the same
+    code; changing even one pixel gives a different code (except with
+    negligible probability). The app shows it so users can SEE that the same
+    settings and seed reproduce exactly the same noisy image.
+    """
+    validate_grayscale_image(image)
+    digest = hashlib.sha256()
+    digest.update(str(image.shape).encode("ascii"))
+    digest.update(np.ascontiguousarray(image).tobytes())
+    return digest.hexdigest()[:12]
+
+
+# --------------------------------------------------------------------------
+# Display helpers (they change only what is SHOWN, never the processed images)
+# --------------------------------------------------------------------------
+# A compact box for the side-by-side comparison on a typical laptop screen.
+DISPLAY_MAX_WIDTH = 560
+DISPLAY_MAX_HEIGHT = 420
+# The zoomed crop is enlarged to about this many screen pixels.
+ZOOM_DISPLAY_SIZE = 320
+
+
+def fit_for_display(image, max_width=DISPLAY_MAX_WIDTH, max_height=DISPLAY_MAX_HEIGHT):
+    """Return a copy shrunk to fit inside max_width x max_height (never enlarged).
+
+    The aspect ratio is kept. Shrinking uses cv2.INTER_AREA, which averages
+    neighbouring pixels; this makes fine noise look weaker, which is why the
+    app also offers a 1:1 zoom of the real pixels.
+    Works for grayscale (2-D) and colour (3-D) arrays.
+    """
+    height, width = image.shape[:2]
+    scale = min(1.0, max_width / width, max_height / height)
+    if scale == 1.0:
+        return image.copy()
+    new_size = (max(1, round(width * scale)), max(1, round(height * scale)))  # OpenCV wants (width, height)
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+
+def crop_square(image, centre_x_percent, centre_y_percent, size):
+    """Cut a size x size square around a point given in percent of the width/height.
+
+    The square is moved inward if it would leave the image, and made smaller
+    if the image itself is smaller. Returns (crop, (top, left)).
+    """
+    height, width = image.shape[:2]
+    size = int(min(size, height, width))
+    centre_x = round(centre_x_percent / 100 * (width - 1))
+    centre_y = round(centre_y_percent / 100 * (height - 1))
+    left = min(max(centre_x - size // 2, 0), width - size)
+    top = min(max(centre_y - size // 2, 0), height - size)
+    return image[top : top + size, left : left + size], (top, left)
+
+
+def enlarge_pixels(image, factor):
+    """Show each pixel as a factor x factor block (nearest neighbour).
+
+    No new values are invented: every displayed value is an original pixel value.
+    """
+    if factor < 1:
+        raise ValueError(f"factor must be at least 1, got {factor}.")
+    return np.repeat(np.repeat(image, factor, axis=0), factor, axis=1)
+
+
 def is_large_image(uploaded, threshold=LARGE_IMAGE_PIXELS):
     """True if the image has more pixels than `threshold` (processing may be slow)."""
     return uploaded.pixel_count > threshold

@@ -1,6 +1,6 @@
 # Presentation Notes (simple English)
 
-_Last updated: 2026-11-17 (after Stage 5A)_
+_Last updated: 2026-11-17 (after Stage 5B)_
 
 ## What the project does (planned, in one breath)
 "We take a clean picture, add a known amount of noise to it on purpose, try
@@ -59,7 +59,7 @@ check the file's fingerprint (SHA-256 hash) is unchanged after loading.
 
 **How do you know the code works?**
 32 automated unit tests for Stage 1 (Python `unittest`), run on 2026-11-16, all passing
-(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A).
+(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A, 244 after Stage 5B).
 They check correct pixel values, colour-to-gray conversion, and every error
 case: missing file, empty file, corrupted file, wrong type, and so on.
 
@@ -306,8 +306,67 @@ Transparent PNGs and very large photos get a yellow warning.
   noise, that would hide or add noise. Streamlit would use JPEG by default, so we force PNG.
 * *Does the uploaded photo leave my computer?* No. The browser sends it to the local server on
   the same computer. We also switched off Streamlit's anonymous usage statistics.
-* *Why is a big photo shown smaller?* Streamlit shrinks images wider than 1460 px for the screen
+* *Why is a big photo shown smaller?* Both images are shrunk to fit a compact box on the screen
   only. The processing always uses the full-size grayscale image.
+
+---
+
+## Stage 5B: adding noise in the web app
+
+**What the user does:** after uploading a photo, the sidebar shows "2. Add Noise".
+Choose one of three noise types, move its slider, and pick a seed.
+The page then shows **Original Grayscale | Noisy image** side by side.
+
+**The three noise options (the same functions as Stage 3, called from the app):**
+
+| Option | What it does, in one sentence | Slider | Default |
+|---|---|---|---|
+| Gaussian | Adds a random brightness change to *every* pixel. | σ: how big the changes typically are (0–100) | 25 |
+| Salt-and-Pepper | Turns a random set of pixels pure white or pure black. | amount: the share of pixels hit (0–50%) | 5% |
+| Speckle | Like Gaussian, but each change is multiplied by the pixel's own brightness, so bright areas get noisier and black stays black. | variance: the size of the random factor (0–0.25) | 0.04 |
+
+The defaults are the Stage 3 baseline experiments, so the app and the experiment log can be compared.
+Only the slider for the chosen noise is shown, and each slider remembers its value when you switch type.
+
+**The seed, simply explained:** the computer's "random" numbers come from a recipe that starts
+from one number, the seed. The same seed gives the same "random" numbers, so the same image,
+settings and seed always give **exactly** the same noisy image. A different seed gives a different
+noise pattern of the same strength.
+
+**How I can show this live:**
+* Under the images there is a **pixel fingerprint**, a 12-character code calculated from every pixel.
+* Change the seed from 42 to 7: the code changes.
+* Change it back to 42: the original code returns.
+* Moving the zoom controls does not change the code, because the noise did not change.
+
+**Why the zoom panel?** Big photos are shrunk to fit the screen. Shrinking averages neighbouring
+pixels, so noise looks weaker than it is. The zoom panel shows the real pixels: each pixel becomes
+a small block, and nothing is smoothed.
+
+**How it connects to Stage 3:**
+* The app does not contain any noise formula.
+* `make_noisy_image` only chooses which of the three existing functions to call. It passes the
+  slider value and seed on unchanged.
+* A test checks that its output is pixel-for-pixel identical to calling the function directly.
+* Another test reproduces the Stage 3 MSE values from the experiment log.
+
+### Likely questions about the noise controls
+* *If you click something else, does the noise change?* No. Every click reruns the page, but the
+  noise is made again from the same seed, so it is identical. A test checks this with the fingerprint.
+* *Why not use a truly random seed?* Then every click would show different noise, and nobody could
+  repeat my results. Reproducibility is required for fair filter comparisons in the next stage.
+* *Why can the slider go to 0?* Strength 0 is allowed by our noise functions and returns the clean
+  image unchanged. It is a useful "no noise" reference.
+* *Why does salt-and-pepper show 5% but you wrote 0.05?* They are the same value. The function
+  receives 0.05 (a fraction); the slider only displays it as a percentage.
+* *What happens with a negative seed?* Our noise functions reject it, and the page shows a red
+  error message instead of crashing.
+* *Why does speckle not change black areas?* The change is brightness × random number, and
+  0 × anything is 0.
+* *Is σ = 25 a lot?* On the 0–255 scale, about two out of three changes are smaller than 25 gray
+  levels. On our synthetic image it gave PSNR 20.51 dB (experiment E002).
+* *Does the app store my photo or noisy image?* No. Everything stays in memory; nothing is saved
+  when you move a slider.
 
 ---
 

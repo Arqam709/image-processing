@@ -1,6 +1,6 @@
 # Report Notes
 
-_Last updated: 2026-11-17 (after Stage 5A)_
+_Last updated: 2026-11-17 (after Stage 5B)_
 
 These are **preparation notes**, not the report. Each section separates:
 
@@ -399,11 +399,11 @@ Status of each box: [I] = implemented, [P] = proposed. The template's example di
 [P] Full results table and figures for all settings (Stage 6)
 ```
 Interactive path (Stage 5): [I] photo upload in the web interface → [I] clean grayscale reference →
-[P] noise (5B) → [P] filter (5C) → [P] MSE/PSNR and four-filter comparison (5D) → [P] downloads (5E).
+[I] noise (5B) → [P] filter (5C) → [P] MSE/PSNR and four-filter comparison (5D) → [P] downloads (5E).
 
 ### 3.6 Interactive web interface "Image Noise Lab" (Stage 5, Streamlit)
 Purpose: let a user try the same pipeline on their **own photo** in a browser, without writing code.
-It is built in five sub-stages (5A–5E). **Only 5A (upload) is implemented so far.**
+It is built in five sub-stages (5A–5E). **5A (upload) and 5B (noise) are implemented so far.**
 
 * **Implemented (5A):** `frontend/app.py` (page) and `frontend/image_processing.py` (helpers, no Streamlit import).
 * **Processing workflow of an upload (5A):**
@@ -429,13 +429,50 @@ It is built in five sub-stages (5A–5E). **Only 5A (upload) is implemented so f
   * A mutation check: 14 deliberately broken versions of the helper were all detected.
   * A real server start: the health check answered "ok" on localhost.
   * The visual look in a browser has not been checked automatically.
-* **Proposed (5B–5E):** noise and filter controls calling `src/noise.py` and `src/filters.py`; metrics from `src/metrics.py`; a comparison of all four filters on the same noisy image; downloads.
+* **Implemented (5B): connection to the noise models (§3.3).**
+  * The sidebar section "2. Add Noise" appears after a valid upload. It has a noise-type selector, **one** strength slider for the selected type, and a "Random Seed" box (default 42).
+  * The slider defaults are the Stage 3 baselines (E002, E005, E008):
+
+    | Noise | Parameter in `src/noise.py` | Slider range (step) | Default |
+    |---|---|---|---|
+    | Gaussian | `sigma` | 0–100 (1) | 25 |
+    | Salt-and-pepper | `amount` | 0–0.50 (0.01), displayed as % | 0.05 |
+    | Speckle | `variance` | 0.00–0.25 (0.01) | 0.04 |
+
+  * `make_noisy_image(reference, noise_type, strength, seed)` looks up the function in a table and calls `add_gaussian_noise`, `add_salt_and_pepper_noise` or `add_speckle_noise` from §3.3. It passes the strength and seed on **unchanged**, so the existing checks in `src/noise.py` apply.
+    * The only extra rule: the app requires a seed (`None` is refused).
+    * The result is a new, read-only `uint8` image of the same size. The clean reference is never changed.
+  * For salt-and-pepper, the sidebar also shows the exact pixel counts from the existing `salt_and_pepper_counts` (for the 256×256 synthetic image at 5%: 3,277 pixels = 1,638 white + 1,639 black).
+  * "How does this noise work?" explains the selected noise in simple words, with the same formulas as §3.3.
+* **Reproducibility (5B):**
+  * Streamlit reruns the whole script after every control change. The noise is generated again each time, always with the chosen seed (D14). So the same image, type, strength and seed give **identical pixels**, and there is no cache that could become stale.
+  * The page shows a *pixel fingerprint*: the first 12 hex characters of SHA-256 over the image shape and pixels.
+  * Page tests confirm all of the following:
+    * the fingerprint equals that of a direct `src/noise.py` call for all three types
+    * it changes with type, strength and seed
+    * returning to seed 42 restores it
+    * moving the zoom controls or a plain rerun does not change it
+  * Helper tests reproduce the logged Stage 3 MSE values of E002, E005 and E008 (577.9914, 1058.0422, 636.4267) from the frontend helper. This was a test run, not a new experiment.
+  * Measured speed: a full page rerun for a 12-megapixel photo took about 0.8 s (AppTest, this computer).
+* **Display (5B):**
+  * "Original Grayscale" and the noisy image are shown side by side, both shrunk the same way (`cv2.INTER_AREA`, aspect ratio kept, never enlarged) to fit 560 × 420 px.
+  * Because shrinking averages pixels and hides noise, the zoom panel cuts the same 16–128 px square from both full-size images. It enlarges them by repeating each pixel, so no new values are created.
+  * The colour upload moved into an expandable panel, so the main comparison is grayscale against grayscale.
+* **Verification (5B):**
+  * 74 helper tests and 26 page tests (both counts include 5A).
+  * A mutation check: 13 deliberately broken versions of the new code were all detected.
+  * A real server start on localhost.
+  * The browser appearance is not verified automatically.
+* **Proposed (5C–5E):** filter controls calling `src/filters.py`; metrics from `src/metrics.py`; a comparison of all four filters on the same noisy image; downloads.
 * **Screenshots / figures needed for the report (Not yet collected; to be taken by the student after the final sub-stage, never mocked up):**
   1. The start page (sidebar with upload, "How the lab works").
-  2. A colour photo uploaded: original vs grayscale reference, with dimensions.
+  2. A colour photo uploaded: grayscale reference with dimensions, and the "Uploaded photo (original colours)" panel.
   3. The error message for a damaged file.
-  4. (After 5B–5D) original / noisy / filtered comparison, the four-filter comparison and the metrics table.
-* **Design decisions:** D31–D39 in `project_overview.md`.
+  4. Original Grayscale vs noisy image for each noise type (Gaussian σ = 25, salt-and-pepper 5%, speckle 0.04) with the sidebar visible.
+  5. The zoom panel showing single noisy pixels.
+  6. The same settings with seed 42 twice (equal fingerprints) and with a different seed (different fingerprint).
+  7. (After 5C–5D) original / noisy / filtered comparison, the four-filter comparison and the metrics table.
+* **Design decisions:** D31–D47 in `project_overview.md`.
 
 ---
 
@@ -583,8 +620,8 @@ Template instruction: "Summarized the whole project".
   * a verified MSE/PSNR implementation
   * three reproducible noise models
   * four validated filter wrappers
-  * a web interface that safely uploads and converts a user's photo (Stage 5A)
-  * 194 passing unit tests
+  * a web interface that safely uploads and converts a user's photo (Stage 5A) and adds reproducible noise to it with the existing noise models (Stage 5B)
+  * 244 passing unit tests
 * **Findings so far that may feed the conclusion:**
   * From §4.0–4.1: PSNR does not capture the *type* of degradation (salt-and-pepper 10% and Gaussian σ = 50 have equal PSNR but look very different). Clipping makes strong noise measure lower than its model predicts.
   * From §4.2, preliminary, one setting per filter: the median filter almost completely removes salt-and-pepper noise in flat regions but erases 1-pixel lines. The bilateral filter preserves edges and lines and works well for Gaussian noise but leaves impulses. Smoothing filters can *lower* the whole-image PSNR when the image contains fine detail.

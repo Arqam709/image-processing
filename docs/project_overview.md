@@ -1,6 +1,6 @@
 # Project Overview: Image Noise Addition and Removal
 
-_Last updated: 2026-11-17 (after Stage 5A)_
+_Last updated: 2026-11-17 (after Stage 5B)_
 
 ## Objective
 Build a Python system that takes a clean digital image, adds controlled noise,
@@ -49,7 +49,7 @@ and why.
 | 4 | Filters (`src/filters.py`, 43 tests, demo, 8 filter experiments E010–E017 on baselines G002 and G005) | ✅ Done (144/144 tests pass) |
 | 5 | Interactive web interface "Image Noise Lab" (Streamlit, `frontend/`), built in five sub-stages: | In progress |
 | 5A | Upload, grayscale conversion, preview, dimensions, invalid-file handling (`frontend/`, 38 + 12 tests) | ✅ Done (194/194 tests pass) |
-| 5B | Noise controls (three noise models, seed), original vs noisy display | Not started |
+| 5B | Noise controls (three noise models, strength sliders, seed), original vs noisy display, 1:1 zoom, noise explanations (74 + 26 frontend tests in total) | ✅ Done (244/244 tests pass) |
 | 5C | Filter controls (four filters), original / noisy / filtered display | Not started |
 | 5D | MSE/PSNR, PSNR change, all-four-filter comparison and table | Not started |
 | 5E | Downloads (noisy, filtered, CSV), final polish and checks | Not started |
@@ -101,9 +101,17 @@ and why.
 | D36 | Every `st.image` call uses `output_format="PNG"` | Streamlit's default re-encodes NumPy arrays as JPEG with quality 90 (read in Streamlit 1.67's `image_utils.py`), which would change pixel values and hide or add noise. |
 | D37 | `frontend/app.py` adds the project root, found from the file's own location (`__file__`), to `sys.path` once | Streamlit runs `app.py` as a script and adds only `frontend/` to the path. Using `__file__` (not the current folder) makes `import src...` work from any folder. We verified this from an unrelated folder. |
 | D38 | `.streamlit/config.toml`: `server.address = "localhost"` and `browser.gatherUsageStats = false` | Observed: by default Streamlit listens on all network connections (other devices on the same Wi-Fi could open the app) and looks up the computer's public IP address. A local demo needs neither. |
-| D39 | No caching in Stage 5A: the upload is decoded again on each page rerun | Decoding is fast, and without a cache there can be no stale results. Caching will be reconsidered when noise and filters are added (5B–5D). |
+| D39 | No caching: on each page rerun the upload is decoded again and the noise is generated again | Without a cache there can be no stale results. Re-checked in 5B: a full page rerun for a 12-megapixel photo took about 0.8 s (measured with AppTest). Noise generation took 0.07–0.46 s of that. To be reconsidered when four filters run per rerun (5C–5D). |
+| D40 | `make_noisy_image(reference, noise_type, strength, seed)` only **selects** the function from `src/noise.py` (a table `NOISE_OPTIONS`) and passes strength and seed on **unchanged**. All strength and seed checks are those of `src/noise.py` | No noise formula exists twice. Tests compare the result pixel by pixel with direct calls (3 types × several strengths × 3 seeds) and reproduce the Stage 3 logged MSE values of E002, E005 and E008. |
+| D41 | The app **requires** a seed: `None` is refused, although `src/noise.py` accepts it | Without a seed, every rerun (any click) would create new random noise. With a seed, the same settings always give identical pixels. |
+| D42 | Slider ranges and defaults: σ 0–100 (step 1, default 25); amount 0–0.50 (step 0.01, shown as %, default 0.05); variance 0.00–0.25 (step 0.01, default 0.04); seed default 42 | The defaults are the Stage 3 baselines E002/E005/E008. The ranges include every Stage 3 value exactly and stay inside the `src/noise.py` rules (≥ 0; amount ≤ 1). Strength 0 is allowed and gives an unchanged copy, as documented in D20. The salt-and-pepper value stays a fraction (0.05); only its display is a percentage. |
+| D43 | The seed box has no minimum; an invalid seed (e.g. −1) reaches `src/noise.py`, which raises an error that the page shows | The seed is checked by the existing rules, not by a second copy of them in the interface. |
+| D44 | Each strength slider has its own key and `persist_state="page"` (a built-in Streamlit option) | Switching Gaussian → Speckle → Gaussian keeps the chosen σ instead of resetting it. No extra session-state code is needed. Checked by a test. |
+| D45 | The noisy image is returned **read-only** | 5C/5D will give the same noisy image to every filter; read-only guarantees that none of them can change it. Stage 4 showed that the OpenCV filters accept read-only input. |
+| D46 | The page shows a **pixel fingerprint**: the first 12 hex characters of SHA-256 over the image shape and pixel bytes | The user can *see* reproducibility: same settings → same code; a different seed → a different code. The tests read it to prove that the page shows exactly the `src/noise.py` result, and that unrelated controls (zoom) do not change the noise. |
+| D47 | Display: both images are shrunk with `cv2.INTER_AREA` to fit 560 × 420 px (never enlarged, aspect ratio kept). A zoom panel shows the same square of both images (16–128 px), enlarged by repeating each pixel | This keeps portrait photos compact on a laptop screen and keeps both images the same size. Shrinking averages pixels and makes noise look weaker, so the zoom shows the real, unsmoothed pixel values. Display copies are never used for processing. |
 
-## Architecture (Stage 5A)
+## Architecture (Stages 5A–5B)
 ```
 Browser ──upload──► frontend/app.py (Streamlit page: layout, messages, display)
                           │ file name + bytes
@@ -116,21 +124,31 @@ Browser ──upload──► frontend/app.py (Streamlit page: layout, messages,
                         pixel limit, colour preview, read-only arrays
                           │ UploadedImage (bytes, preview, grayscale reference)
                           ▼
-                    frontend/app.py shows images, dimensions,
-                    and src.image_io.get_image_info / format_image_info
+Sidebar controls (noise type, strength, seed)
+                          │ UploadedImage.grayscale (read-only clean reference)
+                          ▼
+                    make_noisy_image(reference, noise_type, strength, seed)
+                      NOISE_OPTIONS table ──► src/noise.py
+                        add_gaussian_noise / add_salt_and_pepper_noise / add_speckle_noise
+                          │ noisy image (new, read-only uint8)
+                          ▼
+                    frontend/app.py shows Original Grayscale | Noisy (fit_for_display),
+                    zoom (crop_square + enlarge_pixels), pixel fingerprint,
+                    dimensions, src.image_io.get_image_info / format_image_info
 ```
-Later sub-stages will add calls to `src/noise.py` (5B), `src/filters.py` (5C) and `src/metrics.py` (5D).
+Later sub-stages will add calls to `src/filters.py` (5C) and `src/metrics.py` (5D).
 
-## Current limitations of the web interface (Stage 5A)
-* Only the upload step exists. There are no noise, filter, metric or download features yet.
-* Streamlit shrinks images wider than 1460 px for display, using bilinear resampling (read in its source code). This affects only what is shown on screen, not the processed pixels. However, it would make noise look weaker on large photos, so 5B should add a 1:1 zoomed crop.
+## Current limitations of the web interface (Stage 5B)
+* Upload and noise work. There are no filter, metric or download features yet.
+* The side-by-side view is shrunk for large photos, which makes noise look weaker than it is. The zoom panel shows the real pixels; its position is chosen with two sliders, not by clicking on the image.
+* Switching noise type keeps each slider's value only while the user stays on the page. A browser reload resets all controls to their defaults.
 * Transparency is ignored. Only PNG colour types 4 and 6 are detected; palette PNGs with a transparency chunk are not flagged.
 * The pixel limit is checked after decoding. Extremely large images are still limited by OpenCV's own decoder limit.
-* Verified automatically: the helper (38 tests), the page logic (12 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser. The student should check this manually (see README).
+* Verified automatically: the helper (74 tests), the page logic (26 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser, including the slider layout and the zoom panel. The student should check this manually.
 
 ## Open items
 * `course_material/template.docx` was read on 2026-11-16. Findings are in `report_notes.md` §0.
 * The student's own photograph is not yet in `data/input/`.
 * OpenCV documentation URLs (V1, V2, V4, V12 in `references.md`) should be opened once in a browser, because the site blocks automated checks.
-* Stage 5A browser check by the student: launch the app and follow the manual steps in the Stage 5A summary.
+* Browser check by the student for Stages 5A and 5B: launch the app and follow the manual steps in the stage summaries.
 * Filter results so far cover only one setting per filter, two noise cases, one image and one seed. Comparing several kernel sizes and all nine noise baselines is planned for the experiment runner (Stage 6).

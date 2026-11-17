@@ -16,17 +16,35 @@ import cv2
 import numpy as np
 
 from frontend.image_processing import (
+    DEFAULT_SEED,
     LARGE_IMAGE_PIXELS,
     MAX_FILE_SIZE_BYTES,
+    NOISE_OPTIONS,
+    NOISE_TYPES,
     UploadedImage,
     check_file_name,
+    crop_square,
+    describe_noise,
     detect_image_format,
+    enlarge_pixels,
+    fit_for_display,
     format_file_size,
+    get_noise_option,
     is_large_image,
     load_uploaded_image,
+    make_noisy_image,
+    pixel_fingerprint,
     png_has_alpha,
 )
 from src.image_io import load_grayscale_image
+from src.metrics import mse
+from src.noise import (
+    add_gaussian_noise,
+    add_salt_and_pepper_noise,
+    add_speckle_noise,
+    salt_and_pepper_counts,
+)
+from src.synthetic_image import create_synthetic_test_image
 
 
 def encode(extension, array, *params):
@@ -322,6 +340,284 @@ class TestSmallHelpers(unittest.TestCase):
         self.assertEqual(format_file_size(1023), "1023 bytes")
         self.assertEqual(format_file_size(2048), "2.0 KB")
         self.assertEqual(format_file_size(5 * 1024 * 1024), "5.0 MB")
+
+
+# --------------------------------------------------------------------------
+# Stage 5B: noise
+# --------------------------------------------------------------------------
+DIRECT_NOISE_FUNCTIONS = {
+    "gaussian": add_gaussian_noise,
+    "salt_and_pepper": add_salt_and_pepper_noise,
+    "speckle": add_speckle_noise,
+}
+
+
+class TestNoiseOptions(unittest.TestCase):
+    def test_three_types_in_order(self):
+        self.assertEqual(NOISE_TYPES, ("gaussian", "salt_and_pepper", "speckle"))
+
+    def test_each_type_uses_the_existing_function(self):
+        for noise_type, function in DIRECT_NOISE_FUNCTIONS.items():
+            with self.subTest(noise_type=noise_type):
+                self.assertIs(NOISE_OPTIONS[noise_type].function, function)
+
+    def test_parameter_names_match_src_noise(self):
+        self.assertEqual(NOISE_OPTIONS["gaussian"].parameter, "sigma")
+        self.assertEqual(NOISE_OPTIONS["salt_and_pepper"].parameter, "amount")
+        self.assertEqual(NOISE_OPTIONS["speckle"].parameter, "variance")
+
+    def test_defaults_are_the_stage3_baselines(self):
+        """E002 (sigma 25), E005 (amount 0.05), E008 (variance 0.04), seed 42."""
+        self.assertEqual(NOISE_OPTIONS["gaussian"].default, 25)
+        self.assertEqual(NOISE_OPTIONS["salt_and_pepper"].default, 0.05)
+        self.assertEqual(NOISE_OPTIONS["speckle"].default, 0.04)
+        self.assertEqual(DEFAULT_SEED, 42)
+
+    def test_slider_ranges_cover_stage3_values_and_obey_src_noise_rules(self):
+        stage3_values = {"gaussian": (10, 25, 50), "salt_and_pepper": (0.02, 0.05, 0.10), "speckle": (0.01, 0.04, 0.10)}
+        for noise_type, values in stage3_values.items():
+            option = NOISE_OPTIONS[noise_type]
+            with self.subTest(noise_type=noise_type):
+                self.assertGreaterEqual(option.minimum, 0)  # src/noise.py rejects negative strengths
+                self.assertGreater(option.step, 0)
+                for value in values + (option.default,):
+                    self.assertTrue(option.minimum <= value <= option.maximum)
+                    # every Stage 3 value can be reached exactly with the slider step
+                    steps = (value - option.minimum) / option.step
+                    self.assertAlmostEqual(steps, round(steps), places=9)
+        self.assertLessEqual(NOISE_OPTIONS["salt_and_pepper"].maximum, 1.0)  # amount <= 1 in src/noise.py
+
+    def test_get_noise_option_errors(self):
+        for bad in ("poisson", "Gaussian", "", "salt and pepper"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "Unknown noise type"):
+                    get_noise_option(bad)
+        for bad in (None, 1, ["gaussian"]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    get_noise_option(bad)
+
+
+class TestMakeNoisyImage(unittest.TestCase):
+    def setUp(self):
+        self.image = create_synthetic_test_image()  # 256 x 256, values 20..240
+        self.original_copy = self.image.copy()
+
+    def test_exactly_equal_to_direct_calls(self):
+        cases = [
+            ("gaussian", 25), ("gaussian", 10), ("gaussian", 99),
+            ("salt_and_pepper", 0.05), ("salt_and_pepper", 0.3),
+            ("speckle", 0.04), ("speckle", 0.25),
+        ]
+        for noise_type, strength in cases:
+            for seed in (0, 42, 12345):
+                with self.subTest(noise_type=noise_type, strength=strength, seed=seed):
+                    expected = DIRECT_NOISE_FUNCTIONS[noise_type](self.image, strength, seed=seed)
+                    np.testing.assert_array_equal(make_noisy_image(self.image, noise_type, strength, seed), expected)
+
+    def test_reproduces_stage3_logged_results(self):
+        """The app gives the same noisy images as Stage 3 (MSE values from experiment_log.md)."""
+        logged = {("gaussian", 25): 577.9914, ("salt_and_pepper", 0.05): 1058.0422, ("speckle", 0.04): 636.4267}
+        for (noise_type, strength), logged_mse in logged.items():
+            with self.subTest(noise_type=noise_type):
+                noisy = make_noisy_image(self.image, noise_type, strength, 42)
+                self.assertAlmostEqual(mse(self.image, noisy), logged_mse, places=4)
+
+    def test_same_settings_same_pixels(self):
+        for noise_type in NOISE_TYPES:
+            strength = NOISE_OPTIONS[noise_type].default
+            with self.subTest(noise_type=noise_type):
+                first = make_noisy_image(self.image, noise_type, strength, 42)
+                second = make_noisy_image(self.image, noise_type, strength, 42)
+                np.testing.assert_array_equal(first, second)
+                self.assertEqual(pixel_fingerprint(first), pixel_fingerprint(second))
+
+    def test_different_seeds_give_different_noise(self):
+        for noise_type in NOISE_TYPES:
+            strength = NOISE_OPTIONS[noise_type].default
+            with self.subTest(noise_type=noise_type):
+                a = make_noisy_image(self.image, noise_type, strength, 42)
+                b = make_noisy_image(self.image, noise_type, strength, 43)
+                self.assertFalse(np.array_equal(a, b))
+
+    def test_reference_is_not_changed(self):
+        for noise_type in NOISE_TYPES:
+            with self.subTest(noise_type=noise_type):
+                make_noisy_image(self.image, noise_type, NOISE_OPTIONS[noise_type].maximum, 42)
+                np.testing.assert_array_equal(self.image, self.original_copy)
+
+    def test_works_with_read_only_uploaded_reference(self):
+        uploaded = load_uploaded_image("synthetic.png", encode(".png", self.image))
+        before = uploaded.grayscale.copy()
+        for noise_type in NOISE_TYPES:
+            with self.subTest(noise_type=noise_type):
+                noisy = make_noisy_image(uploaded.grayscale, noise_type, NOISE_OPTIONS[noise_type].default, 42)
+                self.assertFalse(np.shares_memory(noisy, uploaded.grayscale))
+        np.testing.assert_array_equal(uploaded.grayscale, before)
+        self.assertFalse(uploaded.grayscale.flags.writeable)
+
+    def test_output_shape_dtype_and_read_only(self):
+        image = random_gray(height=31, width=17)
+        for noise_type in NOISE_TYPES:
+            with self.subTest(noise_type=noise_type):
+                noisy = make_noisy_image(image, noise_type, NOISE_OPTIONS[noise_type].default, 42)
+                self.assertEqual(noisy.shape, (31, 17))
+                self.assertEqual(noisy.dtype, np.uint8)
+                self.assertFalse(noisy.flags.writeable)
+
+    def test_strength_zero_returns_unchanged_copy(self):
+        for noise_type in NOISE_TYPES:
+            with self.subTest(noise_type=noise_type):
+                noisy = make_noisy_image(self.image, noise_type, 0, 42)
+                np.testing.assert_array_equal(noisy, self.image)
+                self.assertFalse(np.shares_memory(noisy, self.image))
+
+    def test_salt_and_pepper_changes_exact_number_of_pixels(self):
+        noisy = make_noisy_image(self.image, "salt_and_pepper", 0.05, 42)
+        selected, salt, pepper = salt_and_pepper_counts(self.image.size, 0.05)
+        self.assertEqual(int(np.count_nonzero(noisy != self.image)), selected)  # 3,277 for 256 x 256
+        self.assertEqual(int(np.count_nonzero(noisy == 255)), salt)
+        self.assertEqual(int(np.count_nonzero(noisy == 0)), pepper)
+
+    def test_invalid_noise_type(self):
+        with self.assertRaises(ValueError):
+            make_noisy_image(self.image, "poisson", 25, 42)
+        with self.assertRaises(TypeError):
+            make_noisy_image(self.image, None, 25, 42)
+
+    def test_invalid_strengths_are_rejected_by_src_noise(self):
+        value_errors = [
+            ("gaussian", -1), ("gaussian", float("nan")), ("gaussian", float("inf")),
+            ("salt_and_pepper", -0.01), ("salt_and_pepper", 1.5),
+            ("speckle", -0.04), ("speckle", float("nan")),
+        ]
+        for noise_type, strength in value_errors:
+            with self.subTest(noise_type=noise_type, strength=strength):
+                with self.assertRaises(ValueError):
+                    make_noisy_image(self.image, noise_type, strength, 42)
+        for noise_type in NOISE_TYPES:
+            for strength in ("25", None, True, [1]):
+                with self.subTest(noise_type=noise_type, strength=strength):
+                    with self.assertRaises(TypeError):
+                        make_noisy_image(self.image, noise_type, strength, 42)
+
+    def test_invalid_seeds(self):
+        with self.assertRaisesRegex(ValueError, "seed is required"):
+            make_noisy_image(self.image, "gaussian", 25, None)
+        for noise_type in NOISE_TYPES:
+            with self.subTest(noise_type=noise_type):
+                with self.assertRaises(ValueError):
+                    make_noisy_image(self.image, noise_type, NOISE_OPTIONS[noise_type].default, -1)
+                for bad in (1.5, "42", True, np.bool_(False)):
+                    with self.assertRaises(TypeError):
+                        make_noisy_image(self.image, noise_type, NOISE_OPTIONS[noise_type].default, bad)
+
+    def test_numpy_integer_seed_accepted(self):
+        np.testing.assert_array_equal(
+            make_noisy_image(self.image, "gaussian", 25, np.int64(42)),
+            make_noisy_image(self.image, "gaussian", 25, 42),
+        )
+
+    def test_invalid_reference_images(self):
+        for bad in (None, [[1, 2]], np.zeros((4, 4), dtype=np.float64), np.zeros((4, 4, 3), dtype=np.uint8)):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises((TypeError, ValueError)):
+                    make_noisy_image(bad, "gaussian", 25, 42)
+
+
+class TestDescribeNoise(unittest.TestCase):
+    def test_labels(self):
+        self.assertEqual(describe_noise("gaussian", 25), "Gaussian Noise — σ = 25")
+        self.assertEqual(describe_noise("salt_and_pepper", 0.05), "Salt-and-Pepper Noise — 5% of pixels")
+        self.assertEqual(describe_noise("salt_and_pepper", 0.07), "Salt-and-Pepper Noise — 7% of pixels")
+        self.assertEqual(describe_noise("speckle", 0.04), "Speckle Noise — variance = 0.04")
+
+    def test_unknown_type(self):
+        with self.assertRaises(ValueError):
+            describe_noise("poisson", 1)
+
+
+class TestPixelFingerprint(unittest.TestCase):
+    def test_same_pixels_same_code(self):
+        image = random_gray()
+        self.assertEqual(pixel_fingerprint(image), pixel_fingerprint(image.copy()))
+        self.assertEqual(len(pixel_fingerprint(image)), 12)
+
+    def test_one_pixel_changes_code(self):
+        image = random_gray()
+        changed = image.copy()
+        changed[5, 5] ^= 1
+        self.assertNotEqual(pixel_fingerprint(image), pixel_fingerprint(changed))
+
+    def test_shape_is_part_of_the_code(self):
+        image = random_gray(height=4, width=6)
+        self.assertNotEqual(pixel_fingerprint(image), pixel_fingerprint(image.reshape(6, 4)))
+
+    def test_non_contiguous_view(self):
+        image = random_gray()
+        view = image[:, ::2]
+        self.assertEqual(pixel_fingerprint(view), pixel_fingerprint(view.copy()))
+
+    def test_invalid_input(self):
+        with self.assertRaises(ValueError):
+            pixel_fingerprint(np.zeros((3, 3), dtype=np.float32))
+
+
+class TestDisplayHelpers(unittest.TestCase):
+    def test_small_image_is_not_enlarged(self):
+        image = random_gray(height=40, width=60)
+        shown = fit_for_display(image)
+        np.testing.assert_array_equal(shown, image)
+        self.assertFalse(np.shares_memory(shown, image))
+
+    def test_portrait_photo_fits_the_box_and_keeps_its_shape(self):
+        image = np.zeros((4000, 3000), dtype=np.uint8)  # portrait phone photo
+        shown = fit_for_display(image, max_width=560, max_height=420)
+        self.assertEqual(shown.shape, (420, 315))  # 3000/4000 = 315/420
+
+    def test_landscape_photo(self):
+        shown = fit_for_display(np.zeros((3000, 4000, 3), dtype=np.uint8), max_width=560, max_height=420)
+        self.assertEqual(shown.shape, (420, 560, 3))
+
+    def test_very_wide_image(self):
+        shown = fit_for_display(np.zeros((10, 5000), dtype=np.uint8), max_width=560, max_height=420)
+        self.assertEqual(shown.shape, (1, 560))
+
+    def test_fit_does_not_change_input(self):
+        image = random_gray(height=900, width=700)
+        before = image.copy()
+        fit_for_display(image)
+        np.testing.assert_array_equal(image, before)
+
+    def test_crop_centre(self):
+        image = np.arange(100, dtype=np.uint8).reshape(10, 10)
+        crop, (top, left) = crop_square(image, 50, 50, 4)
+        # centre = round(0.5 * 9) = round(4.5) = 4 (Python rounds .5 to even); window starts 2 earlier
+        self.assertEqual((top, left), (2, 2))
+        np.testing.assert_array_equal(crop, image[2:6, 2:6])
+
+    def test_crop_corners_stay_inside(self):
+        image = np.arange(100, dtype=np.uint8).reshape(10, 10)
+        self.assertEqual(crop_square(image, 0, 0, 4)[1], (0, 0))
+        self.assertEqual(crop_square(image, 100, 100, 4)[1], (6, 6))
+        self.assertEqual(crop_square(image, 100, 0, 4)[1], (0, 6))
+
+    def test_crop_larger_than_image(self):
+        image = random_gray(height=10, width=30)
+        crop, (top, left) = crop_square(image, 50, 50, 64)
+        self.assertEqual(crop.shape, (10, 10))
+        self.assertEqual(top, 0)
+
+    def test_enlarge_pixels(self):
+        image = np.array([[1, 2], [3, 4]], dtype=np.uint8)
+        big = enlarge_pixels(image, 3)
+        self.assertEqual(big.shape, (6, 6))
+        np.testing.assert_array_equal(big[:3, :3], 1)
+        np.testing.assert_array_equal(big[3:, 3:], 4)
+        self.assertEqual(set(np.unique(big)), {1, 2, 3, 4})  # no new values
+        np.testing.assert_array_equal(enlarge_pixels(image, 1), image)
+        with self.assertRaises(ValueError):
+            enlarge_pixels(image, 0)
 
 
 if __name__ == "__main__":

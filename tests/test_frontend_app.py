@@ -9,12 +9,17 @@ test_frontend_image_processing.py.
 Run from the project root:  python -m unittest tests.test_frontend_app -v
 """
 
+import re
 import unittest
 from pathlib import Path
 
 import cv2
 import numpy as np
 from streamlit.testing.v1 import AppTest
+
+from frontend.image_processing import pixel_fingerprint
+from src.noise import add_gaussian_noise, add_salt_and_pepper_noise, add_speckle_noise
+from src.synthetic_image import create_synthetic_test_image
 
 APP_PATH = str(Path(__file__).resolve().parent.parent / "frontend" / "app.py")
 TIMEOUT_SECONDS = 60
@@ -117,6 +122,149 @@ class TestAppWithInvalidUploads(unittest.TestCase):
         # A BMP renamed to .png passes that check, so our content check must catch it.
         bmp = encode(".bmp", np.zeros((5, 5), dtype=np.uint8))
         self.check_rejected("picture.png", bmp, "not a PNG or JPEG")
+
+
+# --------------------------------------------------------------------------
+# Stage 5B: noise controls
+# --------------------------------------------------------------------------
+SYNTHETIC = create_synthetic_test_image()  # 256 x 256, the Stage 3 test image
+SYNTHETIC_PNG = encode(".png", SYNTHETIC)
+
+
+def fingerprint_shown(app):
+    """Read the pixel fingerprint of the noisy image from the page."""
+    for caption in app.caption:
+        match = re.search(r"Pixel fingerprint of the noisy image: `([0-9a-f]{12})`", caption.value)
+        if match:
+            return match.group(1)
+    raise AssertionError("No pixel fingerprint shown on the page.")
+
+
+def expected_fingerprint(function, strength, seed=42):
+    return pixel_fingerprint(function(SYNTHETIC, strength, seed=seed))
+
+
+def settings_text(app):
+    return " ".join(m.value for m in app.markdown if m.value.startswith("**Settings:**"))
+
+
+class TestNoiseControlsVisibility(unittest.TestCase):
+    def test_no_noise_controls_before_upload(self):
+        app = run_app()
+        self.assertEqual(len(app.sidebar.radio), 0)
+        self.assertEqual(len(app.number_input), 0)
+
+    def test_no_noise_controls_after_invalid_upload(self):
+        app = run_app(("broken.png", b"\x89PNG\r\n\x1a\n" + b"x" * 100))
+        self.assertEqual(len(app.sidebar.radio), 0)
+        self.assertEqual(len(app.exception), 0)
+
+    def test_defaults_after_upload(self):
+        app = run_app(("synthetic.png", SYNTHETIC_PNG))
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.error), 0)
+        self.assertIn("2. Add Noise", [h.value for h in app.sidebar.header])
+        self.assertEqual(app.radio(key="noise_type").value, "gaussian")
+        self.assertEqual(app.radio(key="noise_type").options, ["Gaussian Noise", "Salt-and-Pepper Noise", "Speckle Noise"])
+        self.assertEqual(app.slider(key="gaussian_sigma").value, 25)
+        self.assertEqual(app.number_input(key="seed").value, 42)
+        self.assertEqual(app.number_input(key="seed").label, "Random Seed")
+        self.assertIn("Gaussian Noise — σ = 25", settings_text(app))
+        self.assertIn("seed = 42", settings_text(app))
+
+    def test_only_the_selected_strength_slider_is_shown(self):
+        app = run_app(("synthetic.png", SYNTHETIC_PNG))
+        strength_keys = {"gaussian_sigma", "salt_and_pepper_amount", "speckle_variance"}
+        for noise_type, expected_key in [
+            ("gaussian", "gaussian_sigma"),
+            ("salt_and_pepper", "salt_and_pepper_amount"),
+            ("speckle", "speckle_variance"),
+        ]:
+            with self.subTest(noise_type=noise_type):
+                app.radio(key="noise_type").set_value(noise_type).run()
+                shown = {s.key for s in app.sidebar.slider} & strength_keys
+                self.assertEqual(shown, {expected_key})
+
+
+class TestNoiseResults(unittest.TestCase):
+    """The page must show exactly the pixels that src/noise.py produces."""
+
+    def setUp(self):
+        self.app = run_app(("synthetic.png", SYNTHETIC_PNG))
+
+    def test_default_gaussian_matches_direct_call(self):
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_gaussian_noise, 25))
+
+    def test_switching_noise_type_updates_the_result(self):
+        gaussian = fingerprint_shown(self.app)
+        self.app.radio(key="noise_type").set_value("salt_and_pepper").run()
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_salt_and_pepper_noise, 0.05))
+        self.assertIn("Salt-and-Pepper Noise — 5% of pixels", settings_text(self.app))
+        self.assertIn("3,277 of 65,536 pixels (1,638 white, 1,639 black)", all_text(self.app.sidebar.caption))
+        self.app.radio(key="noise_type").set_value("speckle").run()
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_speckle_noise, 0.04))
+        self.assertIn("Speckle Noise — variance = 0.04", settings_text(self.app))
+        self.assertNotEqual(fingerprint_shown(self.app), gaussian)
+        self.assertEqual(len(self.app.exception), 0)
+
+    def test_changing_strength_updates_the_result(self):
+        before = fingerprint_shown(self.app)
+        self.app.slider(key="gaussian_sigma").set_value(40).run()
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_gaussian_noise, 40))
+        self.assertNotEqual(fingerprint_shown(self.app), before)
+        self.assertIn("σ = 40", settings_text(self.app))
+
+    def test_changing_speckle_variance(self):
+        self.app.radio(key="noise_type").set_value("speckle").run()
+        self.app.slider(key="speckle_variance").set_value(0.1).run()
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_speckle_noise, 0.1))
+
+    def test_changing_salt_and_pepper_amount(self):
+        self.app.radio(key="noise_type").set_value("salt_and_pepper").run()
+        self.app.slider(key="salt_and_pepper_amount").set_value(0.1).run()
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_salt_and_pepper_noise, 0.1))
+
+    def test_seed_changes_pattern_and_is_reproducible(self):
+        first = fingerprint_shown(self.app)
+        self.app.number_input(key="seed").set_value(7).run()
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_gaussian_noise, 25, seed=7))
+        self.assertNotEqual(fingerprint_shown(self.app), first)
+        self.app.number_input(key="seed").set_value(42).run()
+        self.assertEqual(fingerprint_shown(self.app), first)
+
+    def test_unrelated_controls_do_not_change_the_noise(self):
+        first = fingerprint_shown(self.app)
+        self.app.slider(key="zoom_x").set_value(10).run()
+        self.assertEqual(fingerprint_shown(self.app), first)
+        self.app.select_slider(key="zoom_size").set_value(16).run()
+        self.assertEqual(fingerprint_shown(self.app), first)
+        self.app.run()  # a plain rerun
+        self.assertEqual(fingerprint_shown(self.app), first)
+
+    def test_slider_value_is_remembered_when_switching_type(self):
+        self.app.slider(key="gaussian_sigma").set_value(40).run()
+        self.app.radio(key="noise_type").set_value("speckle").run()
+        self.app.radio(key="noise_type").set_value("gaussian").run()
+        self.assertEqual(self.app.slider(key="gaussian_sigma").value, 40)
+        self.assertEqual(fingerprint_shown(self.app), expected_fingerprint(add_gaussian_noise, 40))
+
+    def test_negative_seed_shows_safe_error(self):
+        self.app.number_input(key="seed").set_value(-1).run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertEqual(len(self.app.error), 1)
+        self.assertIn("Noise could not be added", self.app.error[0].value)
+        self.assertIn("non-negative", self.app.error[0].value)
+
+    def test_noise_explanation_follows_selected_type(self):
+        def explanation():
+            [panel] = [e for e in self.app.expander if e.label == "How does this noise work?"]
+            return all_text(panel.markdown)
+
+        self.assertIn("standard deviation", explanation())
+        self.app.radio(key="noise_type").set_value("salt_and_pepper").run()
+        self.assertIn("salt", explanation())
+        self.app.radio(key="noise_type").set_value("speckle").run()
+        self.assertIn("times its own brightness", explanation())
 
 
 if __name__ == "__main__":
