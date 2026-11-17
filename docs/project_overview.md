@@ -1,6 +1,6 @@
 # Project Overview: Image Noise Addition and Removal
 
-_Last updated: 2026-11-16 (after Stage 4)_
+_Last updated: 2026-11-17 (after Stage 5A)_
 
 ## Objective
 Build a Python system that takes a clean digital image, adds controlled noise,
@@ -28,13 +28,16 @@ and why.
 | opencv-python | 5.0.0.93 | Image decoding/encoding, filters |
 | numpy | 2.5.5 | Pixel arrays, noise generation, statistics |
 | matplotlib | 3.11.2 | Figures and histograms |
+| streamlit | 1.67.0 | Web interface "Image Noise Lab" (installed 2026-11-17 for Stage 5) |
 | unittest | built in | Automated tests |
 | Git | 2.49.0 | Local version history (no commits yet) |
 
 ## Scope
 * **In scope:** 8-bit grayscale images; Gaussian, salt-and-pepper and speckle
   noise (implemented); mean, Gaussian, median and bilateral filters (implemented); MSE and PSNR (implemented).
-* **Possible later:** SSIM, colour (RGB) images, a simple Tkinter interface.
+* **In scope (Stage 5):** a local Streamlit web interface where a user uploads a photo, adds noise,
+  applies a filter and compares the results. The interface calls the existing `src/` functions only.
+* **Possible later:** SSIM, colour (RGB) images.
 * **Out of scope:** deep-learning denoising, real camera noise modelling.
 
 ## Implementation stages
@@ -44,12 +47,17 @@ and why.
 | 2 | MSE and PSNR metrics (`src/metrics.py`, 31 tests, demo) | ✅ Done (63/63 tests pass) |
 | 3 | Noise functions (`src/noise.py`, 38 tests, demo, 9 baseline experiments E001–E009) | ✅ Done (101/101 tests pass) |
 | 4 | Filters (`src/filters.py`, 43 tests, demo, 8 filter experiments E010–E017 on baselines G002 and G005) | ✅ Done (144/144 tests pass) |
-| 5 | Visualization (comparison figures) | Not started |
-| 6 | Experiment runner (CSV table + saved images) | Not started |
+| 5 | Interactive web interface "Image Noise Lab" (Streamlit, `frontend/`), built in five sub-stages: | In progress |
+| 5A | Upload, grayscale conversion, preview, dimensions, invalid-file handling (`frontend/`, 38 + 12 tests) | ✅ Done (194/194 tests pass) |
+| 5B | Noise controls (three noise models, seed), original vs noisy display | Not started |
+| 5C | Filter controls (four filters), original / noisy / filtered display | Not started |
+| 5D | MSE/PSNR, PSNR change, all-four-filter comparison and table | Not started |
+| 5E | Downloads (noisy, filtered, CSV), final polish and checks | Not started |
+| 6 | Experiment runner (CSV table + saved images) and static comparison figures for the report | Not started |
 | 7 | Analysis of real results | Not started |
 | 8 | draw.io block diagram | Not started |
 | 9 | Optional: SSIM, RGB | Not decided |
-| 10 | Optional: interactive interface (Tkinter proposed) | Needs approval |
+| 10 | Optional: interactive interface | Replaced by Stage 5 (Streamlit chosen by the student on 2026-11-17 instead of the earlier Tkinter proposal) |
 | 11 | Report and presentation preparation | Not started |
 
 ## Important design decisions
@@ -85,9 +93,44 @@ and why.
 | D28 | Demo default settings: kernel 3 for mean/Gaussian/median; bilateral d = 5, sigmaColor = sigmaSpace = 50 | Kernel 3 is the smallest smoothing window and is the same for the three kernel filters. The bilateral values follow OpenCV's documented guidance (d = 5; equal sigmas; < 10 little effect, > 150 "cartoonish"). Not tuned for best PSNR. |
 | D29 | Stage 4 demo recreates the Stage 3 noisy images G002 and G005 with seed 42 instead of reading them, and checks they equal the saved PNGs (read-only) | Works even when `results/` is empty; proves the filters see exactly the Stage 3 baselines; never overwrites Stage 3 files. New experiment IDs continue at E010. |
 | D30 | The demo also reports MSE inside two regions (flat patch, 1-pixel line block) and the effect of each filter on the clean image | The first run showed that the line block dominates the whole-image MSE. Without the breakdown the whole-image numbers alone would be misleading (see report_notes §4.2). |
+| D31 | The web interface is a separate `frontend/` folder. `frontend/app.py` is interface code only. `frontend/image_processing.py` holds small helpers and does **not** import Streamlit | The helpers can be tested with `unittest` without a web server. D8 still holds: `src/` never imports `frontend/`. No noise, filter or metric formula is copied into `frontend/`. |
+| D32 | Uploads are decoded **in memory** with `cv2.imdecode(..., IMREAD_GRAYSCALE)`, exactly like Stage 1's `load_grayscale_image`, then checked with `validate_grayscale_image`. A second, colour decode is used only for display | The app and the Stage 1–4 demos see identical pixels (a test compares them for PNG and JPEG). We observed that a separate colour decode followed by `cvtColor` can differ by up to 11 levels on a random-noise JPEG, so we use one method everywhere. Nothing is written to disk. |
+| D33 | Only PNG and JPEG are accepted. The extension must be .png/.jpg/.jpeg, **and** the file contents must start with the PNG or JPEG signature | OpenCV would also decode BMP or TIFF data hidden behind a .png name (observed), so the contents decide. Streamlit separately refuses other extensions before our code runs (observed with AppTest). |
+| D34 | Limits: 20 MB per file (set on the upload widget and checked again in the helper), 25 megapixels maximum, and a "may be slow" warning above 4 megapixels | Keeps memory use and processing time reasonable while still accepting normal phone (12 MP) and camera (24 MP) photos. Larger images get a clear message asking the user to resize. |
+| D35 | The original upload is kept as unchangeable `bytes`; the grayscale reference and the colour preview are **read-only** NumPy arrays inside a frozen record (`UploadedImage`) | Any accidental in-place change raises an error instead of silently corrupting the clean reference. Tests check this. |
+| D36 | Every `st.image` call uses `output_format="PNG"` | Streamlit's default re-encodes NumPy arrays as JPEG with quality 90 (read in Streamlit 1.67's `image_utils.py`), which would change pixel values and hide or add noise. |
+| D37 | `frontend/app.py` adds the project root, found from the file's own location (`__file__`), to `sys.path` once | Streamlit runs `app.py` as a script and adds only `frontend/` to the path. Using `__file__` (not the current folder) makes `import src...` work from any folder. We verified this from an unrelated folder. |
+| D38 | `.streamlit/config.toml`: `server.address = "localhost"` and `browser.gatherUsageStats = false` | Observed: by default Streamlit listens on all network connections (other devices on the same Wi-Fi could open the app) and looks up the computer's public IP address. A local demo needs neither. |
+| D39 | No caching in Stage 5A: the upload is decoded again on each page rerun | Decoding is fast, and without a cache there can be no stale results. Caching will be reconsidered when noise and filters are added (5B–5D). |
+
+## Architecture (Stage 5A)
+```
+Browser ──upload──► frontend/app.py (Streamlit page: layout, messages, display)
+                          │ file name + bytes
+                          ▼
+                    frontend/image_processing.py
+                      load_uploaded_image():
+                        check name, size, PNG/JPEG signature
+                        cv2.imdecode(IMREAD_GRAYSCALE)  ── same as src/image_io.load_grayscale_image
+                        src.image_io.validate_grayscale_image
+                        pixel limit, colour preview, read-only arrays
+                          │ UploadedImage (bytes, preview, grayscale reference)
+                          ▼
+                    frontend/app.py shows images, dimensions,
+                    and src.image_io.get_image_info / format_image_info
+```
+Later sub-stages will add calls to `src/noise.py` (5B), `src/filters.py` (5C) and `src/metrics.py` (5D).
+
+## Current limitations of the web interface (Stage 5A)
+* Only the upload step exists. There are no noise, filter, metric or download features yet.
+* Streamlit shrinks images wider than 1460 px for display, using bilinear resampling (read in its source code). This affects only what is shown on screen, not the processed pixels. However, it would make noise look weaker on large photos, so 5B should add a 1:1 zoomed crop.
+* Transparency is ignored. Only PNG colour types 4 and 6 are detected; palette PNGs with a transparency chunk are not flagged.
+* The pixel limit is checked after decoding. Extremely large images are still limited by OpenCV's own decoder limit.
+* Verified automatically: the helper (38 tests), the page logic (12 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser. The student should check this manually (see README).
 
 ## Open items
 * `course_material/template.docx` was read on 2026-11-16. Findings are in `report_notes.md` §0.
 * The student's own photograph is not yet in `data/input/`.
 * OpenCV documentation URLs (V1, V2, V4, V12 in `references.md`) should be opened once in a browser, because the site blocks automated checks.
+* Stage 5A browser check by the student: launch the app and follow the manual steps in the Stage 5A summary.
 * Filter results so far cover only one setting per filter, two noise cases, one image and one seed. Comparing several kernel sizes and all nine noise baselines is planned for the experiment runner (Stage 6).

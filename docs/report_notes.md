@@ -1,6 +1,6 @@
 # Report Notes
 
-_Last updated: 2026-11-16 (after Stage 4)_
+_Last updated: 2026-11-17 (after Stage 5A)_
 
 These are **preparation notes**, not the report. Each section separates:
 
@@ -166,7 +166,8 @@ Template instruction: "Please use draw.io for ploting" (block diagram, see 3.5).
   * `save_grayscale_image(image, path, overwrite=False)`: refuses to overwrite existing files by default.
 * **Implemented:** `src/synthetic_image.py`, which builds the D1 image with NumPy array slicing and a circle mask (y − cy)² + (x − cx)² ≤ r².
 * **Design decisions:** see D1–D8 in `project_overview.md`.
-* **Limitations:** grayscale only; 16-bit images are converted to 8-bit by the decoder; EXIF orientation is not yet tested.
+* **Limitations:** grayscale only; 16-bit images are converted to 8-bit by the decoder.
+* **EXIF orientation (tested in Stage 5A):** a JPEG with EXIF orientation 6 ("rotate 90°") and stored size 32×16 was loaded as 16 wide × 32 high. This held both for `load_grayscale_image` and for the web interface's in-memory decoding, so phone photos appear upright.
 
 ### 3.2 Image quality metrics: MSE and PSNR (Stage 2)
 
@@ -395,8 +396,46 @@ Status of each box: [I] = implemented, [P] = proposed. The template's example di
 [I] Metrics vs. clean image: MSE, PSNR  ◄───────────────────┘
       ▼
 [I] Results table (CSV) + comparison figure (PNG) for the Stage 4 demo
-[P] Full results table and figures for all settings (Stages 5–6)
+[P] Full results table and figures for all settings (Stage 6)
 ```
+Interactive path (Stage 5): [I] photo upload in the web interface → [I] clean grayscale reference →
+[P] noise (5B) → [P] filter (5C) → [P] MSE/PSNR and four-filter comparison (5D) → [P] downloads (5E).
+
+### 3.6 Interactive web interface "Image Noise Lab" (Stage 5, Streamlit)
+Purpose: let a user try the same pipeline on their **own photo** in a browser, without writing code.
+It is built in five sub-stages (5A–5E). **Only 5A (upload) is implemented so far.**
+
+* **Implemented (5A):** `frontend/app.py` (page) and `frontend/image_processing.py` (helpers, no Streamlit import).
+* **Processing workflow of an upload (5A):**
+  1. The user chooses a PNG/JPEG file in the sidebar. Streamlit rejects other extensions and files over 20 MB.
+  2. `load_uploaded_image(file_name, data)` checks:
+     * the extension
+     * that the file is not empty
+     * the size limit (20 MB)
+     * the file signature (the first bytes must be the PNG signature `89 50 4E 47 0D 0A 1A 0A`, or the JPEG signature `FF D8 FF`)
+  3. The bytes are decoded **in memory** with `cv2.imdecode(..., IMREAD_GRAYSCALE)` [V2]. This is the same conversion as `load_grayscale_image` (§3.1), so the formula Y = 0.299·R + 0.587·G + 0.114·B applies [V1].
+  4. The result is checked with `validate_grayscale_image` (2-D, `uint8`, not empty), then against the 25-megapixel limit.
+  5. A colour decode (`IMREAD_COLOR`, converted from BGR to RGB) is made **only for display**. "Colour" means the red, green and blue channels are not all equal.
+  6. The original bytes, the read-only grayscale reference and the read-only preview are stored together in one frozen record. Later steps (5B–5D) will use the grayscale reference as the clean image I for noise, filtering and metrics.
+* **What the page shows (5A):**
+  * the uploaded image and the grayscale reference side by side, at equal size
+  * width, height, number of pixels and file size
+  * pixel statistics from the existing `get_image_info`
+  * notes for colour photos, transparent PNGs and large images
+  * a clear error for damaged, empty or non-PNG/JPEG files
+* **Display detail:** images are sent to the browser as PNG. Streamlit's default would re-encode them as JPEG with quality 90 (read in its source code), which changes pixel values. Streamlit also shrinks images wider than 1460 px **for display only**.
+* **Verification (5A):**
+  * 38 helper tests and 12 page tests with Streamlit's `AppTest`, which runs the page without a browser.
+  * A mutation check: 14 deliberately broken versions of the helper were all detected.
+  * A real server start: the health check answered "ok" on localhost.
+  * The visual look in a browser has not been checked automatically.
+* **Proposed (5B–5E):** noise and filter controls calling `src/noise.py` and `src/filters.py`; metrics from `src/metrics.py`; a comparison of all four filters on the same noisy image; downloads.
+* **Screenshots / figures needed for the report (Not yet collected; to be taken by the student after the final sub-stage, never mocked up):**
+  1. The start page (sidebar with upload, "How the lab works").
+  2. A colour photo uploaded: original vs grayscale reference, with dimensions.
+  3. The error message for a damaged file.
+  4. (After 5B–5D) original / noisy / filtered comparison, the four-filter comparison and the metrics table.
+* **Design decisions:** D31–D39 in `project_overview.md`.
 
 ---
 
@@ -544,7 +583,8 @@ Template instruction: "Summarized the whole project".
   * a verified MSE/PSNR implementation
   * three reproducible noise models
   * four validated filter wrappers
-  * 144 passing unit tests
+  * a web interface that safely uploads and converts a user's photo (Stage 5A)
+  * 194 passing unit tests
 * **Findings so far that may feed the conclusion:**
   * From §4.0–4.1: PSNR does not capture the *type* of degradation (salt-and-pepper 10% and Gaussian σ = 50 have equal PSNR but look very different). Clipping makes strong noise measure lower than its model predicts.
   * From §4.2, preliminary, one setting per filter: the median filter almost completely removes salt-and-pepper noise in flat regions but erases 1-pixel lines. The bilateral filter preserves edges and lines and works well for Gaussian noise but leaves impulses. Smoothing filters can *lower* the whole-image PSNR when the image contains fine detail.
@@ -554,5 +594,5 @@ See `references.md`. Style: IEEE numbered (confirmed by the template's example r
 
 ## Index (source code)
 Template: "Please put your source code here if you it is applicable".
-Current source files: `src/image_io.py`, `src/synthetic_image.py`, `src/metrics.py`, `src/noise.py`, `src/filters.py`, `demos/demo_image_loading.py`, `demos/demo_metrics.py`, `demos/demo_noise.py`, `demos/demo_filters.py`.
+Current source files: `src/image_io.py`, `src/synthetic_image.py`, `src/metrics.py`, `src/noise.py`, `src/filters.py`, `demos/demo_image_loading.py`, `demos/demo_metrics.py`, `demos/demo_noise.py`, `demos/demo_filters.py`, `frontend/app.py`, `frontend/image_processing.py`.
 Final listing to be prepared at the end.

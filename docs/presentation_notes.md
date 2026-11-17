@@ -1,6 +1,6 @@
 # Presentation Notes (simple English)
 
-_Last updated: 2026-11-16 (after Stage 4)_
+_Last updated: 2026-11-17 (after Stage 5A)_
 
 ## What the project does (planned, in one breath)
 "We take a clean picture, add a known amount of noise to it on purpose, try
@@ -59,7 +59,7 @@ check the file's fingerprint (SHA-256 hash) is unchanged after loading.
 
 **How do you know the code works?**
 32 automated unit tests for Stage 1 (Python `unittest`), run on 2026-11-16, all passing
-(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4).
+(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A).
 They check correct pixel values, colour-to-gray conversion, and every error
 case: missing file, empty file, corrupted file, wrong type, and so on.
 
@@ -245,6 +245,69 @@ window = 100, 100, 100, 100, **255**, 100, 100, 100, 100
 * *Is the bilateral filter always the best?* No. It was the worst of the four in the flat region with salt-and-pepper (458.25 vs 2.66 for the median).
 * *Would bigger kernels be better?* More noise removal but more blur. We have not measured that yet; it is planned for the experiment runner (Stage 6).
 * *Would the results be the same on a real photo?* Probably not exactly, because our image has an unusually hard line pattern. We will test the student's own photo later.
+
+---
+
+## Stage 5A: the web app "Image Noise Lab" (upload only, so far)
+
+**What is it?** A web page that runs on my own computer. You upload a photo and see it next to
+its grayscale version. Later sub-stages add noise, filters, metrics and downloads.
+Launch it with `python -m streamlit run frontend/app.py` and open http://localhost:8501.
+
+**Why Streamlit?** It builds a web page from a short Python script: no HTML, JavaScript or
+separate server code. So the whole project stays in one language, and I can explain every line.
+
+**How is it organised? (three layers)**
+1. `frontend/app.py` is only the page: layout, messages and pictures.
+2. `frontend/image_processing.py` checks and decodes the upload. It does not import Streamlit,
+   so it is tested like the rest of the project.
+3. `src/` is the image processing from Stages 1–4, unchanged. The app only *calls* it.
+   No formula is copied.
+
+**What happens when I upload a photo?**
+1. Check the name: .png, .jpg or .jpeg. Check the file is not empty and at most 20 MB.
+2. Check the first bytes. Every PNG starts with the same 8 bytes and every JPEG with `FF D8 FF`.
+   So a text file renamed to `.png` is refused.
+3. Decode it in memory to grayscale with OpenCV. This is exactly the same method as Stage 1,
+   so the app and my demos see the same pixel values. Then check: 2-D, `uint8`, not empty,
+   at most 25 megapixels.
+4. Show the colour original and the grayscale reference side by side, with width, height,
+   pixels and file size.
+
+**Why grayscale?** All our algorithms work on one brightness value per pixel (0–255).
+For colour photos OpenCV uses Y = 0.299·R + 0.587·G + 0.114·B. Green counts most because our
+eyes are most sensitive to green. The page tells the user when a colour photo was converted.
+
+**How is the original protected?**
+* The uploaded bytes are kept exactly as they were.
+* The grayscale image is **read-only**: any attempt to change it in place raises an error.
+* Nothing is saved to disk.
+
+**What can go wrong, and what does the user see?** Each case gives a red message instead of a crash:
+* an empty file
+* a damaged or cut-off file
+* a non-image file
+* a BMP file renamed to .png
+* a file that is too big
+
+Transparent PNGs and very large photos get a yellow warning.
+
+**How was it tested?**
+* 38 tests for the upload helper and 12 tests that run the real page with Streamlit's test tool
+  (no browser needed).
+* 14 deliberately broken versions of the helper were all caught by the tests.
+
+### Likely questions about the web app
+* *Why not write the algorithms again inside the app?* Then there would be two versions that could
+  disagree. The app calls the same tested functions as the demos.
+* *Why is the app only on localhost?* It is a local demo. By default Streamlit would also accept
+  connections from other devices on the same Wi-Fi, so we turned that off.
+* *Why PNG for display and not JPEG?* JPEG compression changes pixel values. When we later show
+  noise, that would hide or add noise. Streamlit would use JPEG by default, so we force PNG.
+* *Does the uploaded photo leave my computer?* No. The browser sends it to the local server on
+  the same computer. We also switched off Streamlit's anonymous usage statistics.
+* *Why is a big photo shown smaller?* Streamlit shrinks images wider than 1460 px for the screen
+  only. The processing always uses the full-size grayscale image.
 
 ---
 
