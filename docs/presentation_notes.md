@@ -1,6 +1,6 @@
 # Presentation Notes (simple English)
 
-_Last updated: 2026-11-17 (after Stage 5B)_
+_Last updated: 2026-11-17 (after Stage 5C)_
 
 ## What the project does (planned, in one breath)
 "We take a clean picture, add a known amount of noise to it on purpose, try
@@ -59,7 +59,7 @@ check the file's fingerprint (SHA-256 hash) is unchanged after loading.
 
 **How do you know the code works?**
 32 automated unit tests for Stage 1 (Python `unittest`), run on 2026-11-16, all passing
-(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A, 244 after Stage 5B).
+(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A, 244 after Stage 5B, 285 after Stage 5C).
 They check correct pixel values, colour-to-gray conversion, and every error
 case: missing file, empty file, corrupted file, wrong type, and so on.
 
@@ -367,6 +367,69 @@ a small block, and nothing is smoothed.
   levels. On our synthetic image it gave PSNR 20.51 dB (experiment E002).
 * *Does the app store my photo or noisy image?* No. Everything stays in memory; nothing is saved
   when you move a slider.
+
+---
+
+## Stage 5C: removing noise in the web app
+
+**What the user does:** in "3. Remove Noise" choose a filter and its settings. The page shows
+**Original Grayscale → Noisy → Filtered** side by side, with one line of settings underneath.
+
+**The pipeline, in one breath:** "The clean grayscale photo gets noise from the chosen seed, and
+the chosen filter is applied to that noisy image. The clean image is never filtered and never changed."
+
+**The four filters in simple words (the same functions as Stage 4):**
+
+| Filter | Idea | Good at | Weak at | Controls (default) |
+|---|---|---|---|---|
+| Mean | average of the window | simple smoothing | blurs edges; spreads a white dot into a gray blob | kernel size (3 × 3) |
+| Gaussian | weighted average: centre counts most | gentle smoothing of random noise | still softens details | kernel size (3 × 3), filter σ (0 = auto) |
+| Median | middle value of the sorted window | removing isolated black/white pixels | erases thin lines and tiny features | kernel size (3 × 3) |
+| Bilateral | average of neighbours that are near **and** similar | smoothing while keeping edges | slower; leaves single white/black dots | diameter (5), sigma color (50), sigma space (50) |
+
+**What the parameters mean:**
+* **Kernel size:** the window. 3 × 3 means the pixel and its 8 neighbours. A bigger window
+  smooths more but blurs more. It is always odd, so there is a centre pixel.
+* **Gaussian filter σ:** the width of the bell curve in pixels. 0 lets OpenCV choose it from the
+  kernel size. This is **not** the noise σ: the noise σ says how strong the noise is, while the
+  filter σ says how widely the filter blurs. The two sliders have different labels on purpose.
+* **Diameter:** how big the bilateral neighbourhood is.
+* **Sigma color:** how different two brightness values may be and still be mixed. Small values
+  keep edges sharper; large values smooth more, almost like a Gaussian blur.
+* **Sigma space:** how far away a neighbour can be and still count.
+
+**How I can show the pipeline live:**
+1. Note the noisy fingerprint.
+2. Switch through all four filters: the noisy fingerprint stays the same and only the filtered one
+   changes. So every filter really gets the same noisy image.
+3. Choose salt-and-pepper 5% and the median filter. Open the zoom at 16 × 16: the white and black
+   dots in the middle image are gone in the right image.
+4. Switch to the bilateral filter: many dots stay. Stage 4 saw the same on the synthetic image.
+
+**Why are there two fingerprints but no quality numbers yet?** Fingerprints only say whether pixels
+are identical. Whether a filter is *better* is measured with MSE and PSNR in the next stage (5D).
+
+### Likely questions about the filter controls
+* *Do you filter the original image or the noisy one?* The noisy one. The original is the reference
+  we compare against. A test checks that the result equals filter(noise(original)) and not
+  filter(original).
+* *When I change the filter, does the noise change?* No. The noise is made again from the same seed,
+  so it is identical. The noisy fingerprint proves it, and a test checks it for all four filters
+  and every filter setting.
+* *Why can't I choose an even kernel size, like 4?* An even window has no centre pixel. Our
+  `src/filters.py` rejects even sizes, so the app only offers 3, 5, 7, … 15.
+* *Why not kernel size 1?* A 1 × 1 window contains only the pixel itself, so the image would not change.
+* *Is the filtered image the original again?* No. Filtering reduces noise but also changes real
+  details, so we never call it "restored".
+* *Which filter is best?* It depends on the noise and the image. In Stage 4 on our synthetic image,
+  the median filter almost completely removed salt-and-pepper in the flat area but erased thin
+  lines, and the bilateral filter worked best for Gaussian noise but left impulses. Stage 5D will
+  show the numbers for any uploaded photo.
+* *Does the app make the photo smaller to be fast?* Only for the screen. The noise and the filter
+  always use the full-size image. On our computer one full update of a 12-megapixel photo took
+  about 0.7–1.1 s.
+* *What happens if a filter fails?* A red message appears, the original and noisy images stay
+  visible, and all settings are kept. A test forces an error to check this.
 
 ---
 

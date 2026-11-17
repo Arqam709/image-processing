@@ -1,22 +1,3 @@
-"""Noise-removal filters for 8-bit grayscale images (Stage 4).
-
-Each function is a small, validated wrapper around one OpenCV function:
-
-    apply_mean_filter       -> cv2.blur             (average of the neighbourhood)
-    apply_gaussian_filter   -> cv2.GaussianBlur     (weighted average, centre counts most)
-    apply_median_filter     -> cv2.medianBlur       (middle value of the neighbourhood)
-    apply_bilateral_filter  -> cv2.bilateralFilter  (average of pixels that are near AND similar)
-
-Shared rules (all tested in tests/test_filters.py):
-* Input: a non-empty 2-D uint8 image (checked with validate_grayscale_image).
-* Output: a NEW uint8 array with the same height and width. The input is never changed.
-* Invalid parameters raise TypeError (wrong type, including booleans) or
-  ValueError (wrong value) with a message that names the parameter.
-
-The filtering itself is done by OpenCV; this module only checks the inputs and
-chooses explicit, documented settings.
-"""
-
 import math
 import numbers
 

@@ -16,25 +16,40 @@ import cv2
 import numpy as np
 
 from frontend.image_processing import (
+    BILATERAL_DIAMETERS,
+    BILATERAL_SIGMA_RANGE,
     DEFAULT_SEED,
+    FILTER_OPTIONS,
+    FILTER_TYPES,
+    GAUSSIAN_FILTER_SIGMA_RANGE,
+    KERNEL_SIZES,
     LARGE_IMAGE_PIXELS,
     MAX_FILE_SIZE_BYTES,
     NOISE_OPTIONS,
     NOISE_TYPES,
     UploadedImage,
+    apply_selected_filter,
     check_file_name,
     crop_square,
+    describe_filter,
     describe_noise,
     detect_image_format,
     enlarge_pixels,
     fit_for_display,
     format_file_size,
+    get_filter_option,
     get_noise_option,
     is_large_image,
     load_uploaded_image,
     make_noisy_image,
     pixel_fingerprint,
     png_has_alpha,
+)
+from src.filters import (
+    apply_bilateral_filter,
+    apply_gaussian_filter,
+    apply_mean_filter,
+    apply_median_filter,
 )
 from src.image_io import load_grayscale_image
 from src.metrics import mse
@@ -618,6 +633,288 @@ class TestDisplayHelpers(unittest.TestCase):
         np.testing.assert_array_equal(enlarge_pixels(image, 1), image)
         with self.assertRaises(ValueError):
             enlarge_pixels(image, 0)
+
+
+# --------------------------------------------------------------------------
+# Stage 5C: filters
+# --------------------------------------------------------------------------
+DIRECT_FILTER_FUNCTIONS = {
+    "mean": apply_mean_filter,
+    "gaussian": apply_gaussian_filter,
+    "median": apply_median_filter,
+    "bilateral": apply_bilateral_filter,
+}
+
+
+class TestFilterOptions(unittest.TestCase):
+    def test_four_filters_in_order(self):
+        self.assertEqual(FILTER_TYPES, ("mean", "gaussian", "median", "bilateral"))
+
+    def test_each_filter_uses_the_existing_function(self):
+        for filter_type, function in DIRECT_FILTER_FUNCTIONS.items():
+            with self.subTest(filter_type=filter_type):
+                self.assertIs(FILTER_OPTIONS[filter_type].function, function)
+
+    def test_defaults_are_the_stage4_settings(self):
+        """Decision D28: kernel 3, Gaussian sigma 0, bilateral 5 / 50 / 50."""
+        self.assertEqual(FILTER_OPTIONS["mean"].defaults, {"kernel_size": 3})
+        self.assertEqual(FILTER_OPTIONS["gaussian"].defaults, {"kernel_size": 3, "sigma": 0})
+        self.assertEqual(FILTER_OPTIONS["median"].defaults, {"kernel_size": 3})
+        self.assertEqual(FILTER_OPTIONS["bilateral"].defaults, {"diameter": 5, "sigma_color": 50, "sigma_space": 50})
+
+    def test_defaults_match_the_src_filters_signatures(self):
+        """The parameter names and default values are those of src/filters.py."""
+        import inspect
+
+        for filter_type, function in DIRECT_FILTER_FUNCTIONS.items():
+            with self.subTest(filter_type=filter_type):
+                signature = inspect.signature(function).parameters
+                src_defaults = {name: p.default for name, p in signature.items() if name != "image"}
+                self.assertEqual(FILTER_OPTIONS[filter_type].defaults, src_defaults)
+
+    def test_offered_values_obey_src_filters_rules(self):
+        image = random_gray(height=20, width=20)
+        for k in KERNEL_SIZES:
+            self.assertEqual(k % 2, 1)
+            apply_mean_filter(image, k)  # would raise if invalid
+        for d in BILATERAL_DIAMETERS:
+            self.assertEqual(d % 2, 1)
+            self.assertGreaterEqual(d, 3)
+        self.assertTrue({3, 5, 7, 9}.issubset(KERNEL_SIZES))
+        self.assertIn(5, BILATERAL_DIAMETERS)
+        self.assertEqual(GAUSSIAN_FILTER_SIGMA_RANGE[0], 0.0)  # 0 = auto, allowed by src/filters.py
+        self.assertGreater(BILATERAL_SIGMA_RANGE[0], 0)  # bilateral sigmas must be > 0
+        low, high, _ = BILATERAL_SIGMA_RANGE
+        self.assertTrue(low <= 50 <= high)
+
+    def test_get_filter_option_errors(self):
+        for bad in ("box", "Median", "", "gaussian_noise"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "Unknown filter type"):
+                    get_filter_option(bad)
+        for bad in (None, 3, ["mean"]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    get_filter_option(bad)
+
+
+class TestApplySelectedFilter(unittest.TestCase):
+    def setUp(self):
+        self.reference = create_synthetic_test_image()
+        self.reference_copy = self.reference.copy()
+        self.noisy = make_noisy_image(self.reference, "gaussian", 25, 42)  # read-only
+        self.noisy_copy = self.noisy.copy()
+
+    def test_exactly_equal_to_direct_calls(self):
+        cases = [
+            ("mean", {"kernel_size": 3}), ("mean", {"kernel_size": 7}), ("mean", {"kernel_size": 15}),
+            ("gaussian", {"kernel_size": 3, "sigma": 0.0}), ("gaussian", {"kernel_size": 5, "sigma": 1.5}),
+            ("gaussian", {"kernel_size": 9, "sigma": 0.0}), ("gaussian", {"kernel_size": 3, "sigma": 5.0}),
+            ("median", {"kernel_size": 3}), ("median", {"kernel_size": 5}), ("median", {"kernel_size": 11}),
+            ("bilateral", {"diameter": 5, "sigma_color": 50, "sigma_space": 50}),
+            ("bilateral", {"diameter": 9, "sigma_color": 10, "sigma_space": 150}),
+            ("bilateral", {"diameter": 3, "sigma_color": 200, "sigma_space": 1}),
+        ]
+        for filter_type, parameters in cases:
+            with self.subTest(filter_type=filter_type, parameters=parameters):
+                expected = DIRECT_FILTER_FUNCTIONS[filter_type](self.noisy, **parameters)
+                np.testing.assert_array_equal(apply_selected_filter(self.noisy, filter_type, parameters), expected)
+
+    def test_parameters_are_forwarded(self):
+        """Different parameter values must reach src/filters.py and give different results."""
+        pairs = [
+            ("mean", {"kernel_size": 3}, {"kernel_size": 5}),
+            ("gaussian", {"kernel_size": 5, "sigma": 0.0}, {"kernel_size": 5, "sigma": 3.0}),
+            ("gaussian", {"kernel_size": 3, "sigma": 1.0}, {"kernel_size": 7, "sigma": 1.0}),
+            ("median", {"kernel_size": 3}, {"kernel_size": 5}),
+            ("bilateral", {"diameter": 5, "sigma_color": 50, "sigma_space": 50}, {"diameter": 9, "sigma_color": 50, "sigma_space": 50}),
+            ("bilateral", {"diameter": 5, "sigma_color": 10, "sigma_space": 50}, {"diameter": 5, "sigma_color": 150, "sigma_space": 50}),
+            ("bilateral", {"diameter": 9, "sigma_color": 50, "sigma_space": 1}, {"diameter": 9, "sigma_color": 50, "sigma_space": 100}),
+        ]
+        for filter_type, first, second in pairs:
+            with self.subTest(filter_type=filter_type, first=first, second=second):
+                a = apply_selected_filter(self.noisy, filter_type, first)
+                b = apply_selected_filter(self.noisy, filter_type, second)
+                self.assertFalse(np.array_equal(a, b))
+
+    def test_parameters_reach_the_function_unchanged(self):
+        calls = []
+
+        def spy(image, **kwargs):
+            calls.append((image, kwargs))
+            return image.copy()
+
+        parameters = {"diameter": 7, "sigma_color": 12.5, "sigma_space": 99}
+        option = FILTER_OPTIONS["bilateral"]
+        with mock.patch.dict(FILTER_OPTIONS, {"bilateral": option.__class__(**{**option.__dict__, "function": spy})}):
+            apply_selected_filter(self.noisy, "bilateral", parameters)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0], self.noisy)  # the noisy image itself, not the reference
+        self.assertEqual(calls[0][1], parameters)
+
+    def test_filters_differ_from_each_other(self):
+        results = {
+            f: pixel_fingerprint(apply_selected_filter(self.noisy, f, FILTER_OPTIONS[f].defaults)) for f in FILTER_TYPES
+        }
+        self.assertEqual(len(set(results.values())), 4)
+
+    def test_noisy_and_reference_unchanged(self):
+        for filter_type in FILTER_TYPES:
+            with self.subTest(filter_type=filter_type):
+                apply_selected_filter(self.noisy, filter_type, FILTER_OPTIONS[filter_type].defaults)
+                np.testing.assert_array_equal(self.noisy, self.noisy_copy)
+                np.testing.assert_array_equal(self.reference, self.reference_copy)
+        self.assertFalse(self.noisy.flags.writeable)
+
+    def test_output_shape_dtype_read_only_and_new(self):
+        noisy = make_noisy_image(random_gray(height=37, width=23), "salt_and_pepper", 0.1, 1)
+        for filter_type in FILTER_TYPES:
+            with self.subTest(filter_type=filter_type):
+                filtered = apply_selected_filter(noisy, filter_type, FILTER_OPTIONS[filter_type].defaults)
+                self.assertEqual(filtered.shape, (37, 23))
+                self.assertEqual(filtered.dtype, np.uint8)
+                self.assertFalse(filtered.flags.writeable)
+                self.assertFalse(np.shares_memory(filtered, noisy))
+
+    def test_kernel_size_one_is_a_copy(self):
+        filtered = apply_selected_filter(self.noisy, "median", {"kernel_size": 1})
+        np.testing.assert_array_equal(filtered, self.noisy)
+        self.assertFalse(np.shares_memory(filtered, self.noisy))
+
+    def test_median_removes_most_salt_and_pepper_in_the_flat_patch(self):
+        """Known Stage 4 behaviour, now through the frontend helper (flat patch rows 141-229, cols 20-114)."""
+        reference = create_synthetic_test_image()
+        noisy = make_noisy_image(reference, "salt_and_pepper", 0.05, 42)
+        filtered = apply_selected_filter(noisy, "median", {"kernel_size": 3})
+        patch = (slice(141, 230), slice(20, 115))
+        self.assertLess(mse(reference[patch], filtered[patch]), 0.02 * mse(reference[patch], noisy[patch]))
+
+    def test_invalid_filter_type(self):
+        with self.assertRaises(ValueError):
+            apply_selected_filter(self.noisy, "box", {"kernel_size": 3})
+        with self.assertRaises(TypeError):
+            apply_selected_filter(self.noisy, None, {"kernel_size": 3})
+
+    def test_parameters_must_be_a_dict_with_exact_names(self):
+        with self.assertRaises(TypeError):
+            apply_selected_filter(self.noisy, "mean", 3)
+        with self.assertRaises(TypeError):
+            apply_selected_filter(self.noisy, "mean", [("kernel_size", 3)])
+        bad = [
+            ("mean", {}),  # missing
+            ("mean", {"kernel_size": 3, "sigma": 1}),  # unknown extra
+            ("gaussian", {"kernel_size": 3}),  # missing sigma
+            ("median", {"ksize": 3}),  # wrong name
+            ("bilateral", {"diameter": 5, "sigma_color": 50}),  # missing sigma_space
+            ("bilateral", {"kernel_size": 5, "sigma_color": 50, "sigma_space": 50}),  # mean's name
+        ]
+        for filter_type, parameters in bad:
+            with self.subTest(filter_type=filter_type, parameters=parameters):
+                with self.assertRaisesRegex(ValueError, "needs exactly these parameters"):
+                    apply_selected_filter(self.noisy, filter_type, parameters)
+
+    def test_invalid_kernel_sizes_rejected_by_src_filters(self):
+        for filter_type in ("mean", "median", "gaussian"):
+            extra = {"sigma": 0.0} if filter_type == "gaussian" else {}
+            for bad in (0, -3, 2, 4, 10):
+                with self.subTest(filter_type=filter_type, bad=bad):
+                    with self.assertRaises(ValueError):
+                        apply_selected_filter(self.noisy, filter_type, {"kernel_size": bad, **extra})
+            for bad in (3.0, "3", None, True):
+                with self.subTest(filter_type=filter_type, bad=bad):
+                    with self.assertRaises(TypeError):
+                        apply_selected_filter(self.noisy, filter_type, {"kernel_size": bad, **extra})
+
+    def test_invalid_gaussian_sigma(self):
+        for bad in (-0.1, -5, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    apply_selected_filter(self.noisy, "gaussian", {"kernel_size": 3, "sigma": bad})
+        for bad in ("1", None, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    apply_selected_filter(self.noisy, "gaussian", {"kernel_size": 3, "sigma": bad})
+
+    def test_invalid_bilateral_parameters(self):
+        good = {"diameter": 5, "sigma_color": 50, "sigma_space": 50}
+        value_errors = [
+            {"diameter": 1}, {"diameter": 4}, {"diameter": 0}, {"diameter": -5},
+            {"sigma_color": 0}, {"sigma_color": -10}, {"sigma_space": 0}, {"sigma_space": float("nan")},
+        ]
+        for change in value_errors:
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError):
+                    apply_selected_filter(self.noisy, "bilateral", {**good, **change})
+        for change in ({"diameter": 5.0}, {"diameter": True}, {"sigma_color": "50"}, {"sigma_space": None}):
+            with self.subTest(change=change):
+                with self.assertRaises(TypeError):
+                    apply_selected_filter(self.noisy, "bilateral", {**good, **change})
+
+    def test_invalid_images(self):
+        for bad in (None, np.zeros((4, 4), dtype=np.float32), np.zeros((4, 4, 3), dtype=np.uint8)):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises((TypeError, ValueError)):
+                    apply_selected_filter(bad, "mean", {"kernel_size": 3})
+
+    def test_deterministic(self):
+        for filter_type in FILTER_TYPES:
+            with self.subTest(filter_type=filter_type):
+                a = apply_selected_filter(self.noisy, filter_type, FILTER_OPTIONS[filter_type].defaults)
+                b = apply_selected_filter(self.noisy, filter_type, FILTER_OPTIONS[filter_type].defaults)
+                np.testing.assert_array_equal(a, b)
+
+
+class TestDescribeFilter(unittest.TestCase):
+    def test_short_labels(self):
+        self.assertEqual(describe_filter("mean", {"kernel_size": 3}, short=True), "Mean Filter — 3 × 3")
+        self.assertEqual(describe_filter("median", {"kernel_size": 5}, short=True), "Median Filter — 5 × 5")
+        self.assertEqual(
+            describe_filter("gaussian", {"kernel_size": 3, "sigma": 0.0}, short=True),
+            "Gaussian Filter — 3 × 3, filter σ = auto",
+        )
+        self.assertEqual(
+            describe_filter("bilateral", {"diameter": 5, "sigma_color": 50, "sigma_space": 50}, short=True),
+            "Bilateral Filter — d = 5",
+        )
+
+    def test_long_labels(self):
+        self.assertEqual(
+            describe_filter("bilateral", {"diameter": 5, "sigma_color": 50, "sigma_space": 50}),
+            "Bilateral Filter — diameter = 5, sigma color = 50, sigma space = 50",
+        )
+        self.assertEqual(
+            describe_filter("gaussian", {"kernel_size": 5, "sigma": 1.5}), "Gaussian Filter — 5 × 5, filter σ = 1.5"
+        )
+
+    def test_filter_and_noise_labels_are_distinct(self):
+        noise = describe_noise("gaussian", 25)
+        filt = describe_filter("gaussian", {"kernel_size": 3, "sigma": 1.0})
+        self.assertIn("Noise", noise)
+        self.assertIn("Filter", filt)
+        self.assertIn("filter σ", filt)
+        self.assertNotIn("Filter", noise)
+
+    def test_unknown_type(self):
+        with self.assertRaises(ValueError):
+            describe_filter("box", {"kernel_size": 3})
+
+
+class TestThreeImageCrops(unittest.TestCase):
+    def test_same_region_for_reference_noisy_and_filtered(self):
+        reference = create_synthetic_test_image()
+        noisy = make_noisy_image(reference, "gaussian", 25, 42)
+        filtered = apply_selected_filter(noisy, "median", {"kernel_size": 3})
+        before = [reference.copy(), noisy.copy(), filtered.copy()]
+        for x, y, size in [(50, 50, 64), (0, 100, 16), (100, 0, 128), (37, 81, 32)]:
+            with self.subTest(x=x, y=y, size=size):
+                results = [crop_square(image, x, y, size) for image in (reference, noisy, filtered)]
+                regions = {region for _, region in results}
+                self.assertEqual(len(regions), 1)
+                top, left = regions.pop()
+                for (crop, _), image in zip(results, (reference, noisy, filtered)):
+                    np.testing.assert_array_equal(crop, image[top : top + size, left : left + size])
+        for image, copy in zip((reference, noisy, filtered), before):
+            np.testing.assert_array_equal(image, copy)
 
 
 if __name__ == "__main__":

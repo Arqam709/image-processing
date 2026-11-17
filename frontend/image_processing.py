@@ -11,8 +11,10 @@ algorithms of its own:
 
 * Noise is added by calling the existing functions in src/noise.py
   (Stage 5B). This module only chooses WHICH function to call.
+* Filters are applied by calling the existing functions in src/filters.py
+  (Stage 5C), in the same way.
 
-Filters and metrics will be connected in Stages 5C-5D in the same way.
+Metrics will be connected in Stage 5D in the same way.
 """
 
 import hashlib
@@ -23,6 +25,12 @@ from pathlib import PurePath
 import cv2
 import numpy as np
 
+from src.filters import (
+    apply_bilateral_filter,
+    apply_gaussian_filter,
+    apply_mean_filter,
+    apply_median_filter,
+)
 from src.image_io import validate_grayscale_image
 from src.noise import add_gaussian_noise, add_salt_and_pepper_noise, add_speckle_noise
 
@@ -323,6 +331,152 @@ def describe_noise(noise_type, strength):
     return f"{option.label} — variance = {strength:g}"
 
 
+# --------------------------------------------------------------------------
+# Filters (Stage 5C): choose and call the existing functions in src/filters.py
+# --------------------------------------------------------------------------
+# Window sizes offered in the app. src/filters.py accepts every odd size >= 1
+# (>= 3 for the bilateral diameter). Size 1 would leave the image unchanged,
+# so the app starts at 3. Even 15 takes well under a second on a
+# 12-megapixel photo (measured in Stage 5C).
+KERNEL_SIZES = (3, 5, 7, 9, 11, 13, 15)
+BILATERAL_DIAMETERS = (3, 5, 7, 9, 11, 13, 15)
+# Slider ranges (minimum, maximum, step) for the filter sigmas.
+GAUSSIAN_FILTER_SIGMA_RANGE = (0.0, 5.0, 0.1)  # 0 = OpenCV chooses from the kernel size
+BILATERAL_SIGMA_RANGE = (1, 200, 1)  # src/filters.py needs > 0
+
+
+@dataclass(frozen=True)
+class FilterOption:
+    """One filter: which src/filters.py function to call, its parameters and texts.
+
+    `defaults` are the Stage 4 demo settings (decision D28): kernel 3,
+    Gaussian sigma 0, bilateral 5 / 50 / 50. Its keys are exactly the
+    parameter names of the src/filters.py function.
+    """
+
+    label: str
+    function: Callable
+    defaults: dict
+    explanation: str
+    benefit: str
+    limitation: str
+
+
+FILTER_OPTIONS = {
+    "mean": FilterOption(
+        label="Mean Filter",
+        function=apply_mean_filter,
+        defaults={"kernel_size": 3},
+        explanation=(
+            "The Mean filter replaces each pixel with the average of nearby pixels. "
+            "It can reduce random noise but may blur edges and fine details."
+        ),
+        benefit="Simple smoothing: random ups and downs are averaged out.",
+        limitation="Blurs edges and fine details. A black or white pixel is spread into a gray blob, not removed.",
+    ),
+    "gaussian": FilterOption(
+        label="Gaussian Filter",
+        function=apply_gaussian_filter,
+        defaults={"kernel_size": 3, "sigma": 0.0},
+        explanation=(
+            "The Gaussian filter uses a weighted average of nearby pixels, giving more "
+            "importance to pixels closer to the center."
+        ),
+        benefit="Reduces random brightness variations, a little more gently than the Mean filter.",
+        limitation="Still softens edges and fine details.",
+    ),
+    "median": FilterOption(
+        label="Median Filter",
+        function=apply_median_filter,
+        defaults={"kernel_size": 3},
+        explanation=(
+            "The Median filter replaces a pixel with the middle value of its neighborhood. "
+            "It is especially useful for removing isolated black and white pixels."
+        ),
+        benefit="Often very effective against Salt-and-Pepper noise, while keeping strong edges.",
+        limitation="Can remove thin lines and small features, because they are a minority in the window.",
+    ),
+    "bilateral": FilterOption(
+        label="Bilateral Filter",
+        function=apply_bilateral_filter,
+        defaults={"diameter": 5, "sigma_color": 50, "sigma_space": 50},
+        explanation="The Bilateral filter smooths similar nearby pixels while trying to preserve strong edges.",
+        benefit="Smooths flat areas while trying to keep edges sharp.",
+        limitation=(
+            "Slower than the others, and it may leave strong impulse noise: a single white "
+            "pixel looks like an \"edge\", so it is not mixed with its neighbours."
+        ),
+    ),
+}
+FILTER_TYPES = tuple(FILTER_OPTIONS)  # ("mean", "gaussian", "median", "bilateral")
+
+
+def get_filter_option(filter_type):
+    """Return the FilterOption for a filter name, or raise a clear error."""
+    if not isinstance(filter_type, str):
+        raise TypeError(f"filter_type must be a string, got {type(filter_type).__name__}.")
+    if filter_type not in FILTER_OPTIONS:
+        raise ValueError(f"Unknown filter type '{filter_type}'. Choose one of: {', '.join(FILTER_TYPES)}.")
+    return FILTER_OPTIONS[filter_type]
+
+
+def apply_selected_filter(noisy_image, filter_type, parameters):
+    """Apply one of the four existing filters to the NOISY image and return the result.
+
+    This only selects and calls the existing function from src/filters.py:
+        "mean"      -> apply_mean_filter(noisy, kernel_size)
+        "gaussian"  -> apply_gaussian_filter(noisy, kernel_size, sigma)
+        "median"    -> apply_median_filter(noisy, kernel_size)
+        "bilateral" -> apply_bilateral_filter(noisy, diameter, sigma_color, sigma_space)
+
+    `parameters` is a dict that must contain exactly the parameter names of
+    that function (so no setting silently falls back to a default). The values
+    are passed on unchanged, and src/filters.py checks them (odd window sizes,
+    sigma >= 0 or > 0, and so on).
+
+    The noisy image is never changed (src/filters.py always returns a new array).
+    The result is a new uint8 image with the same shape, marked read-only.
+    """
+    option = get_filter_option(filter_type)
+    if not isinstance(parameters, dict):
+        raise TypeError(f"parameters must be a dict, got {type(parameters).__name__}.")
+    expected = set(option.defaults)
+    given = set(parameters)
+    if given != expected:
+        missing = ", ".join(sorted(expected - given)) or "none"
+        unknown = ", ".join(sorted(map(str, given - expected))) or "none"
+        raise ValueError(
+            f"{option.label} needs exactly these parameters: {', '.join(sorted(expected))} "
+            f"(missing: {missing}; unknown: {unknown})."
+        )
+    filtered = option.function(noisy_image, **parameters)
+    return _read_only(filtered)
+
+
+def describe_filter(filter_type, parameters, short=False):
+    """A label for the filtered image.
+
+    short=True : for the image caption, e.g. 'Bilateral Filter — d = 5'.
+    short=False: for the settings line, e.g.
+                 'Bilateral Filter — diameter = 5, sigma color = 50, sigma space = 50'.
+    """
+    option = get_filter_option(filter_type)
+    if filter_type == "bilateral":
+        d = parameters["diameter"]
+        if short:
+            return f"{option.label} — d = {d}"
+        return (
+            f"{option.label} — diameter = {d}, sigma color = {parameters['sigma_color']:g}, "
+            f"sigma space = {parameters['sigma_space']:g}"
+        )
+    k = parameters["kernel_size"]
+    text = f"{option.label} — {k} × {k}"
+    if filter_type == "gaussian":
+        sigma = parameters["sigma"]
+        text += ", filter σ = auto" if sigma == 0 else f", filter σ = {sigma:g}"
+    return text
+
+
 def pixel_fingerprint(image):
     """A short code computed from every pixel value (the first 12 characters of SHA-256).
 
@@ -341,11 +495,12 @@ def pixel_fingerprint(image):
 # --------------------------------------------------------------------------
 # Display helpers (they change only what is SHOWN, never the processed images)
 # --------------------------------------------------------------------------
-# A compact box for the side-by-side comparison on a typical laptop screen.
-DISPLAY_MAX_WIDTH = 560
-DISPLAY_MAX_HEIGHT = 420
-# The zoomed crop is enlarged to about this many screen pixels.
-ZOOM_DISPLAY_SIZE = 320
+# A compact box for each image of the side-by-side comparison on a typical
+# laptop screen (three images in a row since Stage 5C).
+DISPLAY_MAX_WIDTH = 420
+DISPLAY_MAX_HEIGHT = 340
+# The zoomed crop is enlarged to about this many screen pixels (16 x 16 -> 256 x 256).
+ZOOM_DISPLAY_SIZE = 256
 
 
 def fit_for_display(image, max_width=DISPLAY_MAX_WIDTH, max_height=DISPLAY_MAX_HEIGHT):

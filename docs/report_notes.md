@@ -1,6 +1,6 @@
 # Report Notes
 
-_Last updated: 2026-11-17 (after Stage 5B)_
+_Last updated: 2026-11-17 (after Stage 5C)_
 
 These are **preparation notes**, not the report. Each section separates:
 
@@ -399,11 +399,11 @@ Status of each box: [I] = implemented, [P] = proposed. The template's example di
 [P] Full results table and figures for all settings (Stage 6)
 ```
 Interactive path (Stage 5): [I] photo upload in the web interface → [I] clean grayscale reference →
-[I] noise (5B) → [P] filter (5C) → [P] MSE/PSNR and four-filter comparison (5D) → [P] downloads (5E).
+[I] noise (5B) → [I] filter (5C) → [P] MSE/PSNR and four-filter comparison (5D) → [P] downloads (5E).
 
 ### 3.6 Interactive web interface "Image Noise Lab" (Stage 5, Streamlit)
 Purpose: let a user try the same pipeline on their **own photo** in a browser, without writing code.
-It is built in five sub-stages (5A–5E). **5A (upload) and 5B (noise) are implemented so far.**
+It is built in five sub-stages (5A–5E). **5A (upload), 5B (noise) and 5C (filters) are implemented so far.**
 
 * **Implemented (5A):** `frontend/app.py` (page) and `frontend/image_processing.py` (helpers, no Streamlit import).
 * **Processing workflow of an upload (5A):**
@@ -463,16 +463,53 @@ It is built in five sub-stages (5A–5E). **5A (upload) and 5B (noise) are imple
   * A mutation check: 13 deliberately broken versions of the new code were all detected.
   * A real server start on localhost.
   * The browser appearance is not verified automatically.
-* **Proposed (5C–5E):** filter controls calling `src/filters.py`; metrics from `src/metrics.py`; a comparison of all four filters on the same noisy image; downloads.
+* **Implemented (5C): connection to the filters (§3.4).**
+  * **Pipeline of the interactive app (every rerun):**
+    ```
+    uploaded file ─► grayscale reference f (read-only)
+                  ─► make_noisy_image(f, noise, strength, seed)  ─► noisy image (read-only)
+                  ─► apply_selected_filter(noisy, filter, parameters) ─► filtered image (read-only)
+    ```
+    The filter always receives the **noisy** image. The clean reference is only displayed (and in 5D it will be the reference for MSE/PSNR).
+  * The sidebar section "3. Remove Noise" has a filter selector and only the controls of the selected filter. The defaults are the Stage 4 settings (D28):
+
+    | Filter | Function in `src/filters.py` | Controls in the app | Default |
+    |---|---|---|---|
+    | Mean | `apply_mean_filter(image, kernel_size)` | kernel 3–15, odd | 3 |
+    | Gaussian | `apply_gaussian_filter(image, kernel_size, sigma)` | kernel 3–15; filter σ 0.0–5.0 (0 = OpenCV chooses) | 3, 0 |
+    | Median | `apply_median_filter(image, kernel_size)` | kernel 3–15, odd | 3 |
+    | Bilateral | `apply_bilateral_filter(image, diameter, sigma_color, sigma_space)` | diameter 3–15, odd; sigmas 1–200 | 5, 50, 50 |
+
+  * `apply_selected_filter` looks up the function in a table. It requires exactly that function's parameter names, passes the values on unchanged (so the existing checks in §3.4.0 apply), and returns a new, read-only `uint8` image of the same size.
+  * The main view shows **Original Grayscale | noisy | filtered** with one settings line (noise, seed, filter). The noisy and filtered images each have a pixel fingerprint; the page labels these as identifiers, not quality measures.
+  * The filtered image is described as filtered or noise-reduced, never as "clean" or "restored".
+  * The zoom panel shows the **same** region of all three images. "How does this filter work?" gives a simple explanation, the main benefit and limitation, and the formula of the selected filter. It does not claim that any filter is best.
+* **Reproducibility (5C):** the noise is generated again from the same seed before the filter runs. So changing only the filter or its parameters leaves the noisy pixels identical. Page tests confirm that:
+  * the noisy fingerprint stays the same for all four filters and for changes of every filter parameter
+  * the filtered fingerprint equals that of a direct `src/` computation filter(noise(reference)) for every filter and for 7 parameter changes
+  * it follows changes of noise strength, type and seed, and the first result returns when the first settings return
+* **Performance (5C, measured, not an experiment result):**
+  * **Setup:** Windows 11, Python 3.12.10, OpenCV 5.0.0 with 12 threads, a 4000 × 3000 test image.
+  * **Filters alone:** mean, Gaussian and bilateral (d = 5) took 4–12 ms; bilateral d = 15 took 92 ms; median took 4 ms at 3 × 3 and 401–439 ms at 9 × 9 to 15 × 15.
+  * **Full page rerun** (decode, Gaussian noise, filter, display) took 0.66–1.06 s. So the app processes at full resolution without caching.
+* **Verification (5C):**
+  * 100 helper tests and 41 page tests (both counts include 5A–5B).
+  * A mutation check: 13 deliberately broken versions of the helper and the page were all detected. These included filtering the clean reference, noise that depends on the filter choice, and a zoom crop from a different region.
+  * A real server start on localhost.
+  * The browser appearance is not verified automatically.
+* **Proposed (5D–5E):** MSE/PSNR from `src/metrics.py`; a comparison of all four filters on the same noisy image; downloads.
 * **Screenshots / figures needed for the report (Not yet collected; to be taken by the student after the final sub-stage, never mocked up):**
   1. The start page (sidebar with upload, "How the lab works").
   2. A colour photo uploaded: grayscale reference with dimensions, and the "Uploaded photo (original colours)" panel.
   3. The error message for a damaged file.
-  4. Original Grayscale vs noisy image for each noise type (Gaussian σ = 25, salt-and-pepper 5%, speckle 0.04) with the sidebar visible.
+  4. The noisy image for each noise type (Gaussian σ = 25, salt-and-pepper 5%, speckle 0.04) with the sidebar visible.
   5. The zoom panel showing single noisy pixels.
   6. The same settings with seed 42 twice (equal fingerprints) and with a different seed (different fingerprint).
-  7. (After 5C–5D) original / noisy / filtered comparison, the four-filter comparison and the metrics table.
-* **Design decisions:** D31–D47 in `project_overview.md`.
+  7. Original / noisy / filtered for salt-and-pepper 5% with the **median** filter, and for Gaussian σ = 25 with the **bilateral** filter.
+  8. The three-image zoom panel showing the median filter removing single white and black pixels.
+  9. One example where the noisy fingerprint stays the same while two different filters are selected.
+  10. (After 5D) the four-filter comparison and the metrics table.
+* **Design decisions:** D31–D55 in `project_overview.md`.
 
 ---
 
@@ -620,8 +657,8 @@ Template instruction: "Summarized the whole project".
   * a verified MSE/PSNR implementation
   * three reproducible noise models
   * four validated filter wrappers
-  * a web interface that safely uploads and converts a user's photo (Stage 5A) and adds reproducible noise to it with the existing noise models (Stage 5B)
-  * 244 passing unit tests
+  * a web interface that safely uploads and converts a user's photo (Stage 5A) and adds reproducible noise to it with the existing noise models (Stage 5B), then filters it with the existing filters (Stage 5C)
+  * 285 passing unit tests
 * **Findings so far that may feed the conclusion:**
   * From §4.0–4.1: PSNR does not capture the *type* of degradation (salt-and-pepper 10% and Gaussian σ = 50 have equal PSNR but look very different). Clipping makes strong noise measure lower than its model predicts.
   * From §4.2, preliminary, one setting per filter: the median filter almost completely removes salt-and-pepper noise in flat regions but erases 1-pixel lines. The bilateral filter preserves edges and lines and works well for Gaussian noise but leaves impulses. Smoothing filters can *lower* the whole-image PSNR when the image contains fine detail.

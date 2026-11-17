@@ -1,6 +1,6 @@
 # Project Overview: Image Noise Addition and Removal
 
-_Last updated: 2026-11-17 (after Stage 5B)_
+_Last updated: 2026-11-17 (after Stage 5C)_
 
 ## Objective
 Build a Python system that takes a clean digital image, adds controlled noise,
@@ -50,7 +50,7 @@ and why.
 | 5 | Interactive web interface "Image Noise Lab" (Streamlit, `frontend/`), built in five sub-stages: | In progress |
 | 5A | Upload, grayscale conversion, preview, dimensions, invalid-file handling (`frontend/`, 38 + 12 tests) | ✅ Done (194/194 tests pass) |
 | 5B | Noise controls (three noise models, strength sliders, seed), original vs noisy display, 1:1 zoom, noise explanations (74 + 26 frontend tests in total) | ✅ Done (244/244 tests pass) |
-| 5C | Filter controls (four filters), original / noisy / filtered display | Not started |
+| 5C | Filter controls (four filters and their parameters), original / noisy / filtered display, three-image zoom, filter explanations (100 + 41 frontend tests in total) | ✅ Done (285/285 tests pass) |
 | 5D | MSE/PSNR, PSNR change, all-four-filter comparison and table | Not started |
 | 5E | Downloads (noisy, filtered, CSV), final polish and checks | Not started |
 | 6 | Experiment runner (CSV table + saved images) and static comparison figures for the report | Not started |
@@ -109,9 +109,17 @@ and why.
 | D44 | Each strength slider has its own key and `persist_state="page"` (a built-in Streamlit option) | Switching Gaussian → Speckle → Gaussian keeps the chosen σ instead of resetting it. No extra session-state code is needed. Checked by a test. |
 | D45 | The noisy image is returned **read-only** | 5C/5D will give the same noisy image to every filter; read-only guarantees that none of them can change it. Stage 4 showed that the OpenCV filters accept read-only input. |
 | D46 | The page shows a **pixel fingerprint**: the first 12 hex characters of SHA-256 over the image shape and pixel bytes | The user can *see* reproducibility: same settings → same code; a different seed → a different code. The tests read it to prove that the page shows exactly the `src/noise.py` result, and that unrelated controls (zoom) do not change the noise. |
-| D47 | Display: both images are shrunk with `cv2.INTER_AREA` to fit 560 × 420 px (never enlarged, aspect ratio kept). A zoom panel shows the same square of both images (16–128 px), enlarged by repeating each pixel | This keeps portrait photos compact on a laptop screen and keeps both images the same size. Shrinking averages pixels and makes noise look weaker, so the zoom shows the real, unsmoothed pixel values. Display copies are never used for processing. |
+| D47 | Display: both images are shrunk with `cv2.INTER_AREA` to fit 560 × 420 px (never enlarged, aspect ratio kept). A zoom panel shows the same square of both images (16–128 px), enlarged by repeating each pixel | This keeps portrait photos compact on a laptop screen and keeps both images the same size. Shrinking averages pixels and makes noise look weaker, so the zoom shows the real, unsmoothed pixel values. Display copies are never used for processing. (Since 5C the box is 420 × 340 px per image; see D54.) |
+| D48 | `apply_selected_filter(noisy, filter_type, parameters)` only **selects** the function from `src/filters.py` (table `FILTER_OPTIONS`). `parameters` must contain **exactly** that function's parameter names. The values are passed on unchanged and checked by `src/filters.py`. The result is read-only | No filter formula exists twice. A missing or misspelt name is an error instead of a silent fallback to a default. Tests compare the result pixel by pixel with direct calls (13 parameter sets). A spy test confirms that the noisy image and the exact parameter values reach the function. |
+| D49 | The filter is always applied to the **noisy** image | This is the pipeline: reference → noise → filter. A page test confirms that the result equals filter(noise(reference)) and differs from filter(reference). A mutation that filtered the reference was caught by 13 tests. |
+| D50 | Controls: kernel sizes 3–15 (odd) for mean, Gaussian and median; Gaussian filter σ 0.0–5.0 (step 0.1, 0 = auto); bilateral diameter 3–15 (odd); sigma color and sigma space 1–200. The defaults are the Stage 4 settings (D28) | All values obey the `src/filters.py` rules: odd sizes; diameter ≥ 3; filter σ ≥ 0; bilateral sigmas > 0. Size 1 is valid but leaves the image unchanged, so it is not offered. The noise σ slider is labelled "Noise standard deviation (σ)" and the filter σ slider "Gaussian filter σ (blur width …)", so the two are not confused. |
+| D51 | No caching and no downscaling: noise and filter run again at full resolution on each rerun | Measured on this computer (Windows 11, Python 3.12.10, OpenCV 5.0.0 with 12 threads), 4000 × 3000 image. The filters alone took 4–12 ms (mean, Gaussian, bilateral d = 5), 92 ms (bilateral d = 15), and 4 ms / 401–439 ms (median 3 × 3 / 9–15). A full page rerun, including decoding and Gaussian noise, took 0.66–1.06 s. |
+| D52 | A second fingerprint for the filtered image, labelled "not a quality measure" | It lets users and tests see that changing only the filter leaves the noisy fingerprint unchanged while the filtered one changes. Quality is measured with MSE/PSNR in 5D. |
+| D53 | If a filter raises an error, the page shows a red message, keeps the original and noisy images, and keeps all controls | A recoverable error must not hide the rest of the work. Tested by forcing an error with `unittest.mock`. |
+| D54 | Three images side by side (`st.columns(3)`), each fitted into 420 × 340 px; the zoom panel shows the same region of all three images, enlarged to about 256 px | Keeps portrait and landscape photos compact on a laptop. Streamlit stacks columns vertically on narrow windows. A page test checks that all three zoom captions name the same rows and columns. |
+| D55 | The settings line keeps the 5B format: "**Settings:** noise = … · seed = … · filter = …" | It shows noise, seed and filter together, and the existing 5B tests did not need to change. |
 
-## Architecture (Stages 5A–5B)
+## Architecture (Stages 5A–5C)
 ```
 Browser ──upload──► frontend/app.py (Streamlit page: layout, messages, display)
                           │ file name + bytes
@@ -132,23 +140,33 @@ Sidebar controls (noise type, strength, seed)
                         add_gaussian_noise / add_salt_and_pepper_noise / add_speckle_noise
                           │ noisy image (new, read-only uint8)
                           ▼
-                    frontend/app.py shows Original Grayscale | Noisy (fit_for_display),
-                    zoom (crop_square + enlarge_pixels), pixel fingerprint,
-                    dimensions, src.image_io.get_image_info / format_image_info
+Sidebar controls (filter type, its parameters)
+                          ▼
+                    apply_selected_filter(noisy, filter_type, parameters)
+                      FILTER_OPTIONS table ──► src/filters.py
+                        apply_mean_filter / apply_gaussian_filter /
+                        apply_median_filter / apply_bilateral_filter
+                          │ filtered image (new, read-only uint8)
+                          ▼
+                    frontend/app.py shows Original Grayscale | Noisy | Filtered
+                    (fit_for_display), zoom of all three (crop_square + enlarge_pixels),
+                    two pixel fingerprints, dimensions,
+                    src.image_io.get_image_info / format_image_info
 ```
-Later sub-stages will add calls to `src/filters.py` (5C) and `src/metrics.py` (5D).
+Stage 5D will add calls to `src/metrics.py`.
 
-## Current limitations of the web interface (Stage 5B)
-* Upload and noise work. There are no filter, metric or download features yet.
-* The side-by-side view is shrunk for large photos, which makes noise look weaker than it is. The zoom panel shows the real pixels; its position is chosen with two sliders, not by clicking on the image.
-* Switching noise type keeps each slider's value only while the user stays on the page. A browser reload resets all controls to their defaults.
+## Current limitations of the web interface (Stage 5C)
+* Upload, noise and one selected filter work. There are no metrics, no four-filter comparison and no downloads yet.
+* The three-image view is shrunk for large photos, which makes noise and filtering effects look weaker than they are. The zoom panel shows the real pixels; its position is chosen with two sliders, not by clicking on the image.
+* Each control keeps its value while the user stays on the page. A browser reload resets all controls to their defaults.
+* Rerun times were measured on one computer with 12 CPU threads. Computers with fewer cores will be slower, especially for the median filter at kernel 9 or larger.
 * Transparency is ignored. Only PNG colour types 4 and 6 are detected; palette PNGs with a transparency chunk are not flagged.
 * The pixel limit is checked after decoding. Extremely large images are still limited by OpenCV's own decoder limit.
-* Verified automatically: the helper (74 tests), the page logic (26 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser, including the slider layout and the zoom panel. The student should check this manually.
+* Verified automatically: the helper (100 tests), the page logic (41 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser, including the three-column layout, the sliders and the zoom panel. The student should check this manually.
 
 ## Open items
 * `course_material/template.docx` was read on 2026-11-16. Findings are in `report_notes.md` §0.
 * The student's own photograph is not yet in `data/input/`.
 * OpenCV documentation URLs (V1, V2, V4, V12 in `references.md`) should be opened once in a browser, because the site blocks automated checks.
-* Browser check by the student for Stages 5A and 5B: launch the app and follow the manual steps in the stage summaries.
+* Browser check by the student for Stages 5A–5C: launch the app and follow the manual steps in the stage summaries.
 * Filter results so far cover only one setting per filter, two noise cases, one image and one seed. Comparing several kernel sizes and all nine noise baselines is planned for the experiment runner (Stage 6).
