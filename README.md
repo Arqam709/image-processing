@@ -11,9 +11,11 @@ three reproducible noise models (Gaussian, salt-and-pepper, speckle), and
 four noise-removal filters (mean, Gaussian, median, bilateral).
 
 **Stage 5 (in progress): Image Noise Lab, a Streamlit web interface.**
-Stages 5A, 5B and 5C are complete. You can upload a PNG/JPEG photo, see its grayscale version,
+Stages 5A–5D are complete. You can upload a PNG/JPEG photo, see its grayscale version,
 add Gaussian, salt-and-pepper or speckle noise with a reproducible seed, and remove it with the
-mean, Gaussian, median or bilateral filter. Metrics (5D) and downloads (5E) come next.
+mean, Gaussian, median or bilateral filter. You can then measure the result with MSE and PSNR,
+compare all four filters on the same noisy image, and see difference images.
+Downloads (5E) come next.
 The full experiment runner comes in a later stage.
 
 ## Setup (Windows PowerShell)
@@ -126,18 +128,59 @@ browser. Press `Ctrl+C` in PowerShell to stop the app.
    * "How does this noise work?" and "How does this filter work?": a simple explanation, the main
      benefit and limitation, and the formula for the selected noise or filter.
    * "Uploaded photo (original colours)", plus the grayscale statistics.
+6. **4. Image Quality Evaluation — MSE and PSNR:**
+   * A table compares the noisy image and the filtered image with the **original grayscale
+     image**, which is always the reference. The numbers come from `src/metrics.py`, computed
+     on the full-size images.
+   * Below it are the **MSE change** (filtered − noisy; negative = less error) and the
+     **PSNR change** (filtered − noisy, in dB; positive = numerically closer to the original).
+   * A short message then says whether the filter made the image numerically closer, farther
+     or unchanged. A filter can make the numbers **worse**, and the page says so.
+   * If an image is identical to the original, its PSNR is shown as ∞. A change that is not a
+     finite number is explained in words instead (never "NaN").
+   * "How do MSE and PSNR work?" explains both formulas with a small worked example
+     (illustrative numbers, not a measurement).
+7. **5. Compare All Four Filters:**
+   * Switch on "Run all four filters". It starts on automatically for images up to 4 megapixels.
+   * All four filters are applied to **exactly the same noisy image**. Each uses the settings
+     currently chosen for it in the sidebar, or its default if you never changed it.
+   * The table lists "No filtering" (the baseline) and the four filters, with their parameters,
+     MSE, PSNR and PSNR change. ★ marks the lowest MSE / highest PSNR, and the baseline can win.
+   * The four filtered images are shown in a row below the table.
+   * The ranking is true only for the current image and settings; no filter is best in general.
+8. **6. Where Did the Pixels Change? — Difference Images** (expandable). Three images show
+   |A − B| for every pixel; black = no change, brighter = larger change:
+   * A: original vs noisy (the noise added)
+   * B: noisy vs filtered (what the filter changed)
+   * C: original vs filtered (the error that remains)
+
+   The raw view shows the exact differences. The "Contrast-enhanced view" multiplies all three by
+   the same factor so small changes become visible. It is for viewing only and never used for
+   MSE or PSNR. A difference image shows *where* pixels changed, not whether the change was an
+   improvement.
+
+The metrics measure similarity to **your uploaded photo in grayscale**. If the photo already had
+camera noise or JPEG artifacts, those count as "correct". The numbers measure only the artificial
+noise and the filtering.
 
 Damaged, empty, oversized or non-PNG/JPEG files show a clear error message instead of crashing.
 An invalid seed (for example a negative number) shows an error message too. If a filter fails,
 an error is shown and the original and noisy images stay visible.
 
-A full page update for a 12-megapixel photo took 0.7–1.1 s on the development computer
-(12 CPU threads). Processing always uses the full resolution.
+**Speed** (measured on the development computer with 12 CPU threads, full page update):
+
+| Image | Comparison off | Comparison on |
+|---|---|---|
+| 256 × 256 synthetic image | 0.07 s | 0.07 s |
+| 4000 × 3000 photo | about 1.4 s | 3.0–3.9 s |
+
+That is why the four-filter comparison starts switched off for photos above 4 megapixels.
+Processing and metrics always use the full resolution.
 Images are processed in memory only. Nothing is saved to disk when you change a control.
 
 **How it connects to the project code:**
 * `frontend/app.py` contains only the interface.
-* `frontend/image_processing.py` holds three kinds of helpers:
+* `frontend/image_processing.py` holds four kinds of helpers:
   * **Upload:** checks the file and decodes it in the same way as
     `src/image_io.load_grayscale_image`, then validates it with `src/image_io.validate_grayscale_image`.
   * **Noise:** `make_noisy_image()` picks and calls the existing function in `src/noise.py`
@@ -146,7 +189,10 @@ Images are processed in memory only. Nothing is saved to disk when you change a 
   * **Filters:** `apply_selected_filter()` picks and calls the existing function in `src/filters.py`
     (`apply_mean_filter`, `apply_gaussian_filter`, `apply_median_filter` or
     `apply_bilateral_filter`). It passes the parameters on unchanged.
-* No algorithm is copied into `frontend/`. Stage 5D will call `src/metrics.py` in the same way.
+  * **Evaluation:** `evaluate_image_quality()` and `compare_all_filters()` call `mse()` and
+    `psnr()` from `src/metrics.py`. `make_difference_image()` uses OpenCV's `cv2.absdiff`
+    (exact |A − B| for 8-bit values) and is for display only.
+* No algorithm is copied into `frontend/`.
 * `.streamlit/config.toml` keeps the app on this computer only (localhost) and turns off
   Streamlit's anonymous usage statistics.
 

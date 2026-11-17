@@ -1,6 +1,6 @@
 # Report Notes
 
-_Last updated: 2026-11-17 (after Stage 5C)_
+_Last updated: 2026-11-17 (after Stage 5D)_
 
 These are **preparation notes**, not the report. Each section separates:
 
@@ -399,11 +399,11 @@ Status of each box: [I] = implemented, [P] = proposed. The template's example di
 [P] Full results table and figures for all settings (Stage 6)
 ```
 Interactive path (Stage 5): [I] photo upload in the web interface → [I] clean grayscale reference →
-[I] noise (5B) → [I] filter (5C) → [P] MSE/PSNR and four-filter comparison (5D) → [P] downloads (5E).
+[I] noise (5B) → [I] filter (5C) → [I] MSE/PSNR, four-filter comparison, difference images (5D) → [P] downloads (5E).
 
 ### 3.6 Interactive web interface "Image Noise Lab" (Stage 5, Streamlit)
 Purpose: let a user try the same pipeline on their **own photo** in a browser, without writing code.
-It is built in five sub-stages (5A–5E). **5A (upload), 5B (noise) and 5C (filters) are implemented so far.**
+It is built in five sub-stages (5A–5E). **5A (upload), 5B (noise), 5C (filters) and 5D (evaluation) are implemented so far.**
 
 * **Implemented (5A):** `frontend/app.py` (page) and `frontend/image_processing.py` (helpers, no Streamlit import).
 * **Processing workflow of an upload (5A):**
@@ -497,7 +497,46 @@ It is built in five sub-stages (5A–5E). **5A (upload), 5B (noise) and 5C (filt
   * A mutation check: 13 deliberately broken versions of the helper and the page were all detected. These included filtering the clean reference, noise that depends on the filter choice, and a zoom crop from a different region.
   * A real server start on localhost.
   * The browser appearance is not verified automatically.
-* **Proposed (5D–5E):** MSE/PSNR from `src/metrics.py`; a comparison of all four filters on the same noisy image; downloads.
+* **Implemented (5D): evaluation in the app.**
+  * **How MSE and PSNR are used:**
+    * Every score is computed by `mse()` and `psnr()` from §3.2 (`src/metrics.py`). It always compares an image with the **original grayscale reference f**, on the full-resolution arrays, never on the shrunk display copies.
+    * Section 4 shows MSE and PSNR for f vs noisy and f vs filtered. It also shows MSE change = MSE(filtered) − MSE(noisy) and PSNR change = PSNR(filtered) − PSNR(noisy).
+    * The verdict ("numerically closer / farther / no change") compares the two MSE values. MSE is always finite, and lower MSE always means higher PSNR.
+    * Noisy-vs-filtered is **never** used as a quality score, because the noisy image is not the truth.
+  * **Infinity:**
+    * Identical images have MSE = 0 and PSNR = ∞, shown as "∞".
+    * When a PSNR change would be ∞ − ∞ (NaN) or infinite, it is not calculated. The page explains the case in words: "no change (both ∞)", "now identical (∞)" or "worse (was ∞)".
+  * **Fair four-filter comparison:**
+    * Section 5 applies all four filters to the **same noisy array**. It is passed four times as the same object, and a spy test checks this. The noise is generated once per run from the selected type, strength and seed.
+    * Every row is scored against the same reference, and a "No filtering" baseline row is included.
+    * Each filter uses the parameters shown in the table: the current sidebar settings for that filter, or its Stage 4 default. Nothing is tuned automatically.
+    * The row(s) with the lowest MSE are marked. If the baseline is best, the page says that no filter improved the numerical result. The page states that the ranking holds only for this image and these settings.
+  * **Difference images (section 6, visualisation only):**
+    * |f − noisy|, |noisy − filtered| and |f − filtered|, computed with `cv2.absdiff`, which gives the exact absolute difference for uint8 with no wrap-around.
+    * An optional contrast enhancement multiplies all three images by one shared factor. It is never used for metrics.
+    * The page states that a difference image shows *where* pixels changed, not whether quality improved.
+  * **What the metrics can and cannot say:** the reference is the uploaded photo in grayscale. Camera noise, blur or JPEG artifacts already in that photo count as "correct". The numbers measure only the artificial noise and the filtering. PSNR does not always agree with human visual judgement (see §4.0–4.1).
+* **Illustrative example vs real results (keep them apart in the report):**
+  * The worked example in "How do MSE and PSNR work?" and in the tests is **illustrative**, not a measurement:
+    * original 100, 100, 100, 100; noisy 120, 80, 110, 90; filtered 105, 95, 105, 95
+    * MSE 250 → 25 and PSNR 24.15 → 34.15 dB (+10.00 dB)
+  * It was confirmed with the real `mse()`/`psnr()` functions. A second illustrative example shows a "worse" case: MSE 50 → 450 (−9.54 dB).
+  * Neither belongs in the experiment log.
+  * Real results on the synthetic image remain those of §4.2 (E010–E017). The app reproduces them exactly: helper tests check E002 = 577.9914 / 20.5116 dB and E013 = 87.8501 / 28.6934 dB (+8.1818 dB).
+* **Performance (5D, measured on this computer, 12 CPU threads; not an experiment result):**
+
+  | Image | Full rerun, comparison off | Comparison on |
+  |---|---|---|
+  | 256 × 256 synthetic | 0.07 s | 0.07 s |
+  | 4000 × 3000 photo | 1.37 s | 3.01 s (defaults), 3.88 s (kernel/diameter 15) |
+
+  So the comparison starts switched off for photos above 4 MP. Each MSE+PSNR pair costs about 0.33 s at 12 MP, partly because `psnr()` recomputes `mse()` internally.
+* **Verification (5D):**
+  * 136 helper tests and 59 page tests (both counts include 5A–5C).
+  * A mutation check: 16 of 17 deliberately broken versions were detected. The one survivor did not actually change the page's behaviour.
+  * A real server start on localhost.
+  * The browser appearance is not verified automatically.
+* **Proposed (5E):** downloads (noisy image, filtered image, metrics CSV) and final polish.
 * **Screenshots / figures needed for the report (Not yet collected; to be taken by the student after the final sub-stage, never mocked up):**
   1. The start page (sidebar with upload, "How the lab works").
   2. A colour photo uploaded: grayscale reference with dimensions, and the "Uploaded photo (original colours)" panel.
@@ -508,8 +547,11 @@ It is built in five sub-stages (5A–5E). **5A (upload), 5B (noise) and 5C (filt
   7. Original / noisy / filtered for salt-and-pepper 5% with the **median** filter, and for Gaussian σ = 25 with the **bilateral** filter.
   8. The three-image zoom panel showing the median filter removing single white and black pixels.
   9. One example where the noisy fingerprint stays the same while two different filters are selected.
-  10. (After 5D) the four-filter comparison and the metrics table.
-* **Design decisions:** D31–D55 in `project_overview.md`.
+  10. Section 4 (MSE/PSNR table, changes and verdict) for one case where the filter helps (e.g. median on salt-and-pepper) and one where it makes the numbers worse (e.g. mean 3 × 3 on Gaussian σ = 25 on the synthetic image).
+  11. Section 5, the four-filter table with the baseline row and the ★ mark, plus the row of four filtered images.
+  12. Section 6, the three difference images, raw and contrast-enhanced.
+  13. One case where "No filtering" is best (for example a fine-texture photo with weak noise), to show that filters can make the numbers worse.
+* **Design decisions:** D31–D64 in `project_overview.md`.
 
 ---
 
@@ -657,8 +699,8 @@ Template instruction: "Summarized the whole project".
   * a verified MSE/PSNR implementation
   * three reproducible noise models
   * four validated filter wrappers
-  * a web interface that safely uploads and converts a user's photo (Stage 5A) and adds reproducible noise to it with the existing noise models (Stage 5B), then filters it with the existing filters (Stage 5C)
-  * 285 passing unit tests
+  * a web interface that safely uploads and converts a user's photo (Stage 5A) and adds reproducible noise to it with the existing noise models (Stage 5B), then filters it with the existing filters (Stage 5C), and evaluates and compares the filters with MSE/PSNR and difference images (Stage 5D)
+  * 339 passing unit tests
 * **Findings so far that may feed the conclusion:**
   * From §4.0–4.1: PSNR does not capture the *type* of degradation (salt-and-pepper 10% and Gaussian σ = 50 have equal PSNR but look very different). Clipping makes strong noise measure lower than its model predicts.
   * From §4.2, preliminary, one setting per filter: the median filter almost completely removes salt-and-pepper noise in flat regions but erases 1-pixel lines. The bilateral filter preserves edges and lines and works well for Gaussian noise but leaves impulses. Smoothing filters can *lower* the whole-image PSNR when the image contains fine detail.

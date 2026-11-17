@@ -478,7 +478,11 @@ class TestFilterResults(unittest.TestCase):
         with mock.patch("frontend.image_processing.apply_selected_filter", side_effect=ValueError("test failure")):
             self.app.run()
         self.assertEqual(len(self.app.exception), 0)
-        self.assertEqual(len(self.app.error), 1)
+        # Updated in Stage 5D (was: exactly 1 error). The mocked failure also stops the new
+        # four-filter comparison (section 5), which correctly reports its own error. The first
+        # error must still be the filter error, and every error must be a safe message.
+        self.assertGreaterEqual(len(self.app.error), 1)
+        self.assertTrue(all("test failure" in e.value for e in self.app.error))
         self.assertIn("The filter could not be applied", self.app.error[0].value)
         self.assertIn("test failure", self.app.error[0].value)
         self.assertEqual(fingerprint_shown(self.app), self.noisy_fp)  # noisy image still shown
@@ -490,6 +494,277 @@ class TestFilterResults(unittest.TestCase):
         self.app.run()
         self.assertEqual(len(self.app.error), 0)
         self.assertIsNotNone(filtered_fingerprint_shown(self.app))
+
+
+# --------------------------------------------------------------------------
+# Stage 5D: MSE / PSNR, four-filter comparison, difference images
+# --------------------------------------------------------------------------
+from frontend.image_processing import format_mse, format_psnr  # noqa: E402
+from src.metrics import mse, psnr  # noqa: E402
+
+
+def page_text(app):
+    """All visible text of the page (for checks like 'no NaN anywhere')."""
+    parts = []
+    for group in (app.title, app.subheader, app.header, app.markdown, app.caption, app.info,
+                  app.success, app.warning, app.error, app.text):
+        parts.extend(str(element.value) for element in group)
+    for metric in app.metric:
+        parts.extend([metric.label, str(metric.value)])
+    for table in app.table:
+        parts.append(table.value.to_string())
+    for image in app.image:
+        parts.extend(image.captions)
+    return "\n".join(parts)
+
+
+def tables(app):
+    """(evaluation table, comparison table or None) as pandas DataFrames."""
+    frames = [t.value for t in app.table]
+    evaluation = next(f for f in frames if "Image" in f.columns)
+    comparison = next((f for f in frames if "Method" in f.columns), None)
+    return evaluation, comparison
+
+
+def expected_rows(reference, noisy, parameters):
+    """MSE/PSNR text for 'none' + four filters, computed directly with src/."""
+    filtered = {
+        "No filtering": noisy,
+        "Mean Filter": apply_mean_filter(noisy, **parameters["mean"]),
+        "Gaussian Filter": apply_gaussian_filter(noisy, **parameters["gaussian"]),
+        "Median Filter": apply_median_filter(noisy, **parameters["median"]),
+        "Bilateral Filter": apply_bilateral_filter(noisy, **parameters["bilateral"]),
+    }
+    return {name: (format_mse(mse(reference, image)), format_psnr(psnr(reference, image))) for name, image in filtered.items()}
+
+
+DEFAULTS = {
+    "mean": {"kernel_size": 3},
+    "gaussian": {"kernel_size": 3, "sigma": 0},
+    "median": {"kernel_size": 3},
+    "bilateral": {"diameter": 5, "sigma_color": 50, "sigma_space": 50},
+}
+
+
+class TestEvaluationSection(unittest.TestCase):
+    def setUp(self):
+        self.app = run_app(("synthetic.png", SYNTHETIC_PNG))
+        self.noisy = add_gaussian_noise(SYNTHETIC, 25, seed=42)
+
+    def test_table_equals_direct_metric_calls(self):
+        evaluation, _ = tables(self.app)
+        filtered = apply_mean_filter(self.noisy, 3)
+        self.assertEqual(list(evaluation["MSE ↓"]), [format_mse(mse(SYNTHETIC, self.noisy)), format_mse(mse(SYNTHETIC, filtered))])
+        self.assertEqual(list(evaluation["PSNR ↑ (dB)"]), [format_psnr(psnr(SYNTHETIC, self.noisy)), format_psnr(psnr(SYNTHETIC, filtered))])
+        self.assertIn("4. Image Quality Evaluation — MSE and PSNR", [s.value for s in self.app.subheader])
+
+    def test_worse_result_is_reported_as_worse(self):
+        """Mean 3 x 3 on Gaussian noise: MSE 577.99 -> 945.68 (E002 -> E010)."""
+        self.assertNotIn("Numerically closer", all_text(self.app.success))
+        warning = all_text(self.app.warning)
+        self.assertIn("Numerically farther from the original", warning)
+        self.assertIn("577.99 → 945.68", warning)
+        metrics = {m.label: m.value for m in self.app.metric}
+        self.assertEqual(metrics["MSE change (filtered − noisy)"], "+367.69")
+        self.assertEqual(metrics["PSNR change (filtered − noisy)"], "−2.14 dB")
+
+    def test_better_result_is_reported_as_better(self):
+        """Bilateral 5/50/50 on Gaussian noise: MSE 577.99 -> 87.85, +8.18 dB (E013)."""
+        self.app.radio(key="filter_type").set_value("bilateral").run()
+        self.assertIn("Numerically closer to the original", all_text(self.app.success))
+        metrics = {m.label: m.value for m in self.app.metric}
+        self.assertEqual(metrics["PSNR change (filtered − noisy)"], "+8.18 dB")
+        self.assertEqual(metrics["MSE change (filtered − noisy)"], "−490.14")
+
+    def test_noise_free_case_has_no_nan_or_inf_arithmetic(self):
+        self.app.slider(key="gaussian_sigma").set_value(0).run()  # noisy == original
+        text = page_text(self.app)
+        self.assertNotIn("nan", text.lower())
+        # no raw Python float infinity ("inf", "-inf"); the word "infinite" in explanations is fine
+        self.assertIsNone(re.search(r"(?<![a-z])-?inf(?![a-z])", text.lower()))
+        self.assertEqual(text.count("there was no error to remove"), 2)  # once in section 4, once (grouped) in 5
+        evaluation, comparison = tables(self.app)
+        self.assertEqual(evaluation["PSNR ↑ (dB)"][0], "∞")
+        metrics = {m.label: m.value for m in self.app.metric}
+        self.assertEqual(metrics["PSNR change (filtered − noisy)"], "worse (was ∞)")
+        self.assertEqual(comparison["Best"][0], "★ lowest MSE / highest PSNR")
+        self.assertIn("No filter improved the numerical result", all_text(self.app.warning))
+
+    def test_metric_explanation_present(self):
+        [panel] = [e for e in self.app.expander if e.label == "How do MSE and PSNR work?"]
+        text = all_text(panel.markdown)
+        self.assertIn("Squaring", text)
+        self.assertIn("infinite", text)
+        self.assertIn("illustrative", text)
+
+    def test_results_follow_noise_and_filter_changes(self):
+        self.app.radio(key="noise_type").set_value("salt_and_pepper").run()
+        self.app.radio(key="filter_type").set_value("median").run()
+        self.app.select_slider(key="median_kernel_size").set_value(5).run()
+        noisy = add_salt_and_pepper_noise(SYNTHETIC, 0.05, seed=42)
+        filtered = apply_median_filter(noisy, 5)
+        evaluation, _ = tables(self.app)
+        self.assertEqual(list(evaluation["MSE ↓"]), [format_mse(mse(SYNTHETIC, noisy)), format_mse(mse(SYNTHETIC, filtered))])
+
+
+class TestFourFilterComparison(unittest.TestCase):
+    def setUp(self):
+        self.app = run_app(("synthetic.png", SYNTHETIC_PNG))
+
+    def check_table(self, reference, noisy, parameters):
+        _, comparison = tables(self.app)
+        self.assertIsNotNone(comparison)
+        expected = expected_rows(reference, noisy, parameters)
+        shown = {m.replace(" (selected)", ""): (a, b) for m, a, b in zip(comparison["Method"], comparison["MSE ↓"], comparison["PSNR ↑ (dB)"])}
+        self.assertEqual(shown, expected)
+        # the "best" mark is on the row(s) with the lowest MSE
+        mses = {name: mse(reference, img) for name, img in [
+            ("No filtering", noisy),
+            ("Mean Filter", apply_mean_filter(noisy, **parameters["mean"])),
+            ("Gaussian Filter", apply_gaussian_filter(noisy, **parameters["gaussian"])),
+            ("Median Filter", apply_median_filter(noisy, **parameters["median"])),
+            ("Bilateral Filter", apply_bilateral_filter(noisy, **parameters["bilateral"])),
+        ]}
+        lowest = min(mses.values())
+        marked = {m.replace(" (selected)", "") for m, best in zip(comparison["Method"], comparison["Best"]) if best}
+        self.assertEqual(marked, {name for name, value in mses.items() if value == lowest})
+        return comparison
+
+    def test_default_comparison_equals_direct_calls(self):
+        self.assertIn("5. Compare All Four Filters", [s.value for s in self.app.subheader])
+        self.assertTrue(self.app.toggle(key="compare_all").value)  # small image: on by default
+        comparison = self.check_table(SYNTHETIC, add_gaussian_noise(SYNTHETIC, 25, seed=42), DEFAULTS)
+        self.assertEqual(comparison["Method"][0], "No filtering")
+        self.assertEqual(comparison["PSNR change"][0], "baseline")
+        self.assertEqual(comparison["Method"][1], "Mean Filter (selected)")
+        self.assertIn("Lowest MSE / highest PSNR for these settings: Bilateral Filter", all_text(self.app.success))
+
+    def test_remembered_parameters_are_used_and_shown(self):
+        self.app.select_slider(key="mean_kernel_size").set_value(7).run()
+        self.app.radio(key="filter_type").set_value("bilateral").run()
+        self.app.select_slider(key="bilateral_diameter").set_value(9).run()
+        self.app.radio(key="filter_type").set_value("gaussian").run()
+        self.app.slider(key="gaussian_filter_sigma").set_value(1.5).run()
+        parameters = {**DEFAULTS, "mean": {"kernel_size": 7}, "gaussian": {"kernel_size": 3, "sigma": 1.5},
+                      "bilateral": {"diameter": 9, "sigma_color": 50, "sigma_space": 50}}
+        comparison = self.check_table(SYNTHETIC, add_gaussian_noise(SYNTHETIC, 25, seed=42), parameters)
+        self.assertEqual(list(comparison["Parameters"]), [
+            "—", "7 × 7", "3 × 3, filter σ = 1.5", "3 × 3", "diameter = 9, sigma color = 50, sigma space = 50"])
+
+    def test_comparison_follows_noise_changes(self):
+        self.app.radio(key="noise_type").set_value("salt_and_pepper").run()
+        self.app.number_input(key="seed").set_value(3).run()
+        noisy = add_salt_and_pepper_noise(SYNTHETIC, 0.05, seed=3)
+        self.check_table(SYNTHETIC, noisy, DEFAULTS)
+
+    def test_four_images_shown_with_parameters(self):
+        captions = [c for image in self.app.image for c in image.captions]
+        for expected in ("Mean Filter — 3 × 3", "Gaussian Filter — 3 × 3, filter σ = auto", "Median Filter — 3 × 3",
+                         "Bilateral Filter — diameter = 5, sigma color = 50, sigma space = 50 ★"):
+            self.assertIn(expected, captions)
+
+    def test_no_filter_best_message(self):
+        texture = np.random.default_rng(5).integers(0, 256, (64, 64), dtype=np.uint8)
+        app = run_app(("texture.png", encode(".png", texture)))
+        app.slider(key="gaussian_sigma").set_value(2).run()
+        noisy = add_gaussian_noise(texture, 2, seed=42)
+        _, comparison = tables(app)
+        self.assertEqual(comparison["Best"][0], "★ lowest MSE / highest PSNR")
+        self.assertTrue(all(b == "" for b in comparison["Best"][1:]))
+        self.assertIn("No filter improved the numerical result", all_text(app.warning))
+        self.assertEqual(dict(zip(comparison["Method"], comparison["MSE ↓"]))["No filtering"],
+                         format_mse(mse(texture, noisy)))
+
+    def test_large_image_starts_switched_off(self):
+        large = np.zeros((2000, 2100), dtype=np.uint8)
+        large[::7] = 200  # some structure; still compresses well
+        app = run_app(("large.png", encode(".png", large)))
+        self.assertFalse(app.toggle(key="compare_all").value)
+        self.assertIsNone(tables(app)[1])
+        self.assertIn("Switched off", all_text(app.caption))
+        app.toggle(key="compare_all").set_value(True).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertIsNotNone(tables(app)[1])
+
+    def test_new_upload_replaces_all_results(self):
+        first = tables(self.app)[1].copy()
+        other = np.random.default_rng(9).integers(30, 220, (80, 120), dtype=np.uint8)
+        self.app.sidebar.file_uploader[0].set_value(("other.png", encode(".png", other), "image/png")).run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertEqual(self.app.metric[0].label, "MSE change (filtered − noisy)")
+        comparison = self.check_table(other, add_gaussian_noise(other, 25, seed=42), DEFAULTS)
+        self.assertFalse(first.equals(comparison))
+        evaluation, _ = tables(self.app)
+        self.assertEqual(evaluation["MSE ↓"][0], format_mse(mse(other, add_gaussian_noise(other, 25, seed=42))))
+
+    def test_comparison_does_not_change_the_noise(self):
+        before = fingerprint_shown(self.app)
+        self.app.toggle(key="compare_all").set_value(False).run()
+        self.assertEqual(fingerprint_shown(self.app), before)
+        self.app.toggle(key="compare_all").set_value(True).run()
+        self.assertEqual(fingerprint_shown(self.app), before)
+
+
+class TestDifferenceSection(unittest.TestCase):
+    def setUp(self):
+        self.app = run_app(("synthetic.png", SYNTHETIC_PNG))
+        self.app.radio(key="noise_type").set_value("salt_and_pepper").run()
+        self.app.radio(key="filter_type").set_value("median").run()
+
+    def panel(self):
+        [panel] = [e for e in self.app.expander if e.label == "6. Where Did the Pixels Change? — Difference Images"]
+        return panel
+
+    def test_three_difference_images_with_exact_counts(self):
+        noisy = add_salt_and_pepper_noise(SYNTHETIC, 0.05, seed=42)
+        filtered = apply_median_filter(noisy, 3)
+        captions = [c for image in self.panel().image for c in image.captions]
+        self.assertEqual(captions, [
+            "A. Noise introduced: |Original − Noisy|",
+            "B. Filter changes: |Noisy − Filtered|",
+            "C. Remaining error after filtering: |Original − Filtered|",
+        ])
+        facts = all_text(self.panel().caption)
+        for a, b in ((SYNTHETIC, noisy), (noisy, filtered), (SYNTHETIC, filtered)):
+            changed = int(np.count_nonzero(a != b))
+            largest = int(np.abs(a.astype(int) - b.astype(int)).max())
+            self.assertIn(f"Changed pixels: {changed:,} ({100 * changed / a.size:.1f}%). Largest difference: {largest}.", facts)
+        self.assertIn("It does not prove that the change improved image quality", all_text(self.panel().markdown))
+
+    def test_enhanced_view_does_not_change_metrics(self):
+        before_tables = [t.value.copy() for t in self.app.table]
+        before_noise = fingerprint_shown(self.app)
+        self.app.toggle(key="difference_enhanced").set_value(True).run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertIn("Contrast enhanced", all_text(self.panel().caption))
+        for before, after in zip(before_tables, [t.value for t in self.app.table]):
+            self.assertTrue(before.equals(after))
+        self.assertEqual(fingerprint_shown(self.app), before_noise)
+
+
+class TestWholePageStillWorks(unittest.TestCase):
+    def test_every_noise_and_filter_combination_renders_without_nan(self):
+        app = run_app(("synthetic.png", SYNTHETIC_PNG))
+        for noise_type in ("gaussian", "salt_and_pepper", "speckle"):
+            app.radio(key="noise_type").set_value(noise_type).run()
+            for filter_type in ("mean", "gaussian", "median", "bilateral"):
+                with self.subTest(noise_type=noise_type, filter_type=filter_type):
+                    app.radio(key="filter_type").set_value(filter_type).run()
+                    self.assertEqual(len(app.exception), 0)
+                    self.assertEqual(len(app.error), 0)
+                    self.assertEqual(len(app.table), 2)
+                    self.assertNotIn("nan", page_text(app).lower())
+
+    def test_constant_image_identical_everywhere(self):
+        flat = np.full((40, 50), 128, dtype=np.uint8)
+        app = run_app(("flat.png", encode(".png", flat)))
+        app.slider(key="gaussian_sigma").set_value(0).run()
+        self.assertEqual(len(app.exception), 0)
+        metrics = {m.label: m.value for m in app.metric}
+        self.assertEqual(metrics["PSNR change (filtered − noisy)"], "no change (both ∞)")
+        self.assertIn("No numerical change", all_text(app.info))
+        self.assertIn("No filter did better than no filtering", all_text(app.info))
+        self.assertNotIn("nan", page_text(app).lower())
 
 
 if __name__ == "__main__":

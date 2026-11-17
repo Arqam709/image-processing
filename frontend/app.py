@@ -3,7 +3,8 @@
 Stage 5A: upload an image, convert it to grayscale and show it.
 Stage 5B: add Gaussian, salt-and-pepper or speckle noise with a fixed seed.
 Stage 5C: remove noise with the mean, Gaussian, median or bilateral filter.
-(Metrics and downloads are added in Stages 5D-5E.)
+Stage 5D: MSE/PSNR evaluation, comparison of all four filters, difference images.
+(Downloads are added in Stage 5E.)
 
 Launch from the project root folder (IP) with:
 
@@ -17,6 +18,8 @@ functions in src/.
 Processing flow on every run:
     uploaded file -> grayscale reference -> noisy image -> filtered image
 The filter is always applied to the noisy image, never to the reference.
+MSE and PSNR always compare an image with the grayscale reference,
+using the full-resolution arrays (never the shrunk display copies).
 
 How Streamlit works: every time the user changes a control, this whole
 script runs again from the top. Because the noise always uses the chosen
@@ -52,9 +55,17 @@ from frontend.image_processing import (  # noqa: E402
     UPLOAD_TYPES,
     ZOOM_DISPLAY_SIZE,
     apply_selected_filter,
+    compare_all_filters,
     crop_square,
     describe_filter,
     describe_noise,
+    enhance_differences,
+    evaluate_image_quality,
+    format_mse,
+    format_psnr,
+    format_signed,
+    make_difference_image,
+    summarize_difference,
     enlarge_pixels,
     fit_for_display,
     format_file_size,
@@ -144,6 +155,25 @@ FILTER_DETAILS = {
         r"g(p) = \frac{\sum_q w(q)\, f(q)}{\sum_q w(q)}",
     ),
 }
+
+
+# Which sidebar widget holds which filter parameter. Used to collect the
+# remembered settings of ALL four filters for the four-filter comparison.
+FILTER_WIDGET_KEYS = {
+    "mean": {"kernel_size": "mean_kernel_size"},
+    "gaussian": {"kernel_size": "gaussian_kernel_size", "sigma": "gaussian_filter_sigma"},
+    "median": {"kernel_size": "median_kernel_size"},
+    "bilateral": {
+        "diameter": "bilateral_diameter",
+        "sigma_color": "bilateral_sigma_color",
+        "sigma_space": "bilateral_sigma_space",
+    },
+}
+
+# Four filters + five MSE/PSNR pairs take about 1-2 s on a 12-megapixel photo
+# (measured in Stage 5D), so the comparison starts switched off for images
+# larger than this.
+COMPARISON_AUTO_ON_MAX_PIXELS = 4_000_000
 
 
 # --------------------------------------------------------------------------
@@ -345,8 +375,21 @@ def show_filter_controls():
                 ),
             }
         st.divider()
-        st.caption("MSE/PSNR measurements will appear in the next stage.")
+        st.caption("The results (MSE, PSNR, the four-filter comparison and difference images) are on the right.")
     return filter_type, parameters
+
+
+def all_filter_parameters(filter_type, parameters):
+    """Parameters for all four filters: the selected one from its controls, the
+    others as remembered in the sidebar (persist_state) or their defaults."""
+    result = {}
+    for name, keys in FILTER_WIDGET_KEYS.items():
+        if name == filter_type:
+            result[name] = dict(parameters)
+        else:
+            defaults = FILTER_OPTIONS[name].defaults
+            result[name] = {param: st.session_state.get(key, defaults[param]) for param, key in keys.items()}
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -360,7 +403,7 @@ def show_welcome():
         ("1. Upload", "Choose a photo. It is converted to a grayscale reference image.", "Available"),
         ("2. Add noise", "Gaussian, salt-and-pepper or speckle noise with a fixed seed.", "Available"),
         ("3. Remove noise", "Mean, Gaussian, median or bilateral filter.", "Available"),
-        ("4. Compare", "MSE and PSNR against the clean grayscale reference.", "Next stage"),
+        ("4. Compare", "MSE and PSNR against the clean grayscale reference.", "Available"),
     ]
     for column, (title, text, status) in zip(st.columns(len(steps)), steps):
         with column.container(border=True):
@@ -423,7 +466,7 @@ def show_comparison(image, noisy, noise_label, seed, filtered, filter_labels):
         st.caption(
             f"Pixel fingerprint of the filtered image: `{pixel_fingerprint(filtered)}`. "
             "Fingerprints only identify pixels; they say nothing about quality "
-            "(MSE and PSNR come in the next stage)."
+            "(MSE and PSNR are in section 4 below)."
         )
         st.caption(
             "The filtered image is the noisy image after filtering. Filtering can reduce "
@@ -487,7 +530,223 @@ def show_filter_explanation(filter_type):
         st.markdown(f"**Benefit:** {option.benefit}  \n**Limitation:** {option.limitation}")
         st.caption("Formula (f = noisy image, g = filtered image, p = pixel, q = neighbour in the window):")
         st.latex(formula)
-        st.caption("No filter is best for every image and noise type. Stage 5D will measure them with MSE and PSNR.")
+        st.caption(
+            "No filter is best for every image and noise type. Sections 4 and 5 below measure "
+            "them with MSE and PSNR for your current image and settings."
+        )
+
+
+# --------------------------------------------------------------------------
+# Stage 5D: evaluation, four-filter comparison, difference images
+# --------------------------------------------------------------------------
+REFERENCE_NOTE = (
+    "The reference is your uploaded photo in grayscale. If that photo already contained camera "
+    "noise, blur or JPEG artifacts, they count as \"correct\" here: the numbers measure only the "
+    "artificial noise added above and the filtering, not whether the photo itself was perfect."
+)
+
+
+def show_evaluation(image, noisy, filtered, noise_label, filter_label):
+    """Section 4: MSE and PSNR of the noisy and the filtered image against the original."""
+    st.subheader("4. Image Quality Evaluation — MSE and PSNR")
+    if filtered is None:
+        st.info("No filtered image is available, so only the noisy image could be evaluated.")
+        return
+    try:
+        result = evaluate_image_quality(image.grayscale, noisy, filtered)
+    except (TypeError, ValueError) as error:
+        st.error(f"**MSE and PSNR could not be calculated.** {error}", icon="🚫")
+        return
+    noisy_scores, filtered_scores = result["noisy"], result["filtered"]
+    st.table(
+        [
+            {"Image": f"Noisy image ({noise_label})", "MSE ↓": format_mse(noisy_scores["mse"]),
+             "PSNR ↑ (dB)": format_psnr(noisy_scores["psnr"])},
+            {"Image": f"Filtered image ({filter_label})", "MSE ↓": format_mse(filtered_scores["mse"]),
+             "PSNR ↑ (dB)": format_psnr(filtered_scores["psnr"])},
+        ]
+    )
+    mse_col, psnr_col = st.columns(2)
+    mse_col.metric("MSE change (filtered − noisy)", format_signed(result["mse_change"]),
+                   help="Negative = less error than the noisy image.")
+    psnr_col.metric("PSNR change (filtered − noisy)", result["psnr_change_text"],
+                    help="Positive = numerically closer to the original.")
+
+    mse_text = f"MSE {format_mse(noisy_scores['mse'])} → {format_mse(filtered_scores['mse'])}"
+    psnr_text = f"PSNR {format_psnr(noisy_scores['psnr'])} → {format_psnr(filtered_scores['psnr'])} dB"
+    if result["verdict"] == "closer":
+        st.success(
+            f"**Numerically closer to the original.** The filtered image has less error than the "
+            f"noisy image ({mse_text}; {psnr_text}). This measures pixel error only; it does not "
+            "guarantee that the image looks better.",
+            icon="📉",
+        )
+    elif result["verdict"] == "farther":
+        st.warning(
+            f"**Numerically farther from the original.** The filter made the error larger "
+            f"({mse_text}; {psnr_text}). A filter also changes real details, such as edges, "
+            "thin lines and texture. Here it changed them more than it removed noise.",
+            icon="📈",
+        )
+    else:
+        st.info(f"**No numerical change.** Both images have exactly the same error ({mse_text}).", icon="➖")
+    if result["psnr_change_note"]:
+        st.caption(result["psnr_change_note"])
+    st.caption(REFERENCE_NOTE)
+    show_metric_explanation()
+
+
+def show_metric_explanation():
+    with st.expander("How do MSE and PSNR work?"):
+        st.markdown(
+            "**MSE — Mean Squared Error.** For every pixel, take the difference between the "
+            "original and the processed value, square it, and average over all N pixels:"
+        )
+        st.latex(r"\mathrm{MSE} = \frac{1}{N} \sum \big(\text{original} - \text{processed}\big)^2")
+        st.markdown(
+            "* **Lower is better:** 0 means the images are identical.\n"
+            "* **Squaring** makes every error positive and makes large errors count much more: "
+            "one pixel that is off by 20 adds 400, but two pixels off by 10 add only 200.\n\n"
+            "**PSNR — Peak Signal-to-Noise Ratio** rewrites the MSE on a logarithmic scale, "
+            "in decibels (dB), using the largest possible 8-bit value 255:"
+        )
+        st.latex(r"\mathrm{PSNR} = 10 \cdot \log_{10}\!\left(\frac{255^2}{\mathrm{MSE}}\right)")
+        st.markdown(
+            "* **Higher is better:** the image is numerically closer to the original.\n"
+            "* Every **+10 dB** means the MSE became 10 times smaller.\n"
+            "* Identical images have MSE = 0 and an **infinite** PSNR (shown as ∞).\n"
+            "* PSNR does **not** always agree with what people see. Two images with the same "
+            "PSNR can look very different, for example blurred vs. speckled.\n\n"
+            "**Small worked example (illustrative numbers, not a measurement):** the original "
+            "pixels are 100, 100, 100, 100. The noisy pixels 120, 80, 110, 90 give "
+            "MSE = (400 + 400 + 100 + 100) / 4 = 250 and PSNR = 24.15 dB. The filtered pixels "
+            "105, 95, 105, 95 give MSE = (25 + 25 + 25 + 25) / 4 = 25 and PSNR = 34.15 dB, "
+            "an improvement of +10 dB."
+        )
+        st.caption("Both values are calculated by the existing functions mse() and psnr() in src/metrics.py.")
+
+
+def show_filter_comparison(image, noisy, filter_parameters, selected_filter):
+    """Section 5: all four filters applied to the SAME noisy image, with MSE and PSNR."""
+    st.subheader("5. Compare All Four Filters")
+    run = st.toggle(
+        "Run all four filters",
+        value=image.pixel_count <= COMPARISON_AUTO_ON_MAX_PIXELS,
+        key="compare_all",
+        help="Applies all four filters to the same noisy image and measures each one.",
+    )
+    if not run:
+        st.caption(
+            "Switched off. Turn it on to apply all four filters to the current noisy image. "
+            "For large photos this adds about 1–2 seconds to every change of a control."
+        )
+        return
+
+    try:
+        comparison = compare_all_filters(image.grayscale, noisy, filter_parameters)
+    except (TypeError, ValueError) as error:
+        st.error(f"**The four-filter comparison could not be completed.** {error}", icon="🚫")
+        return
+    best = set(comparison["best_methods"])
+    table = []
+    for row in comparison["rows"]:
+        table.append(
+            {
+                "Method": row["label"] + (" (selected)" if row["method"] == selected_filter else ""),
+                "Parameters": row["parameter_text"],
+                "MSE ↓": format_mse(row["mse"]),
+                "PSNR ↑ (dB)": format_psnr(row["psnr"]),
+                "PSNR change": row["psnr_change_text"],
+                "Best": "★ lowest MSE / highest PSNR" if row["method"] in best else "",
+            }
+        )
+    st.table(table)
+
+    labels = {row["method"]: row["label"] for row in comparison["rows"]}
+    best_labels = " and ".join(labels[m] for m in comparison["best_methods"])
+    if comparison["baseline_is_best"] and len(best) == 1:
+        st.warning(
+            "**No filter improved the numerical result.** \"No filtering\" has the lowest MSE and "
+            "highest PSNR for these settings: every filter changed the image more than it "
+            "removed noise.",
+            icon="📈",
+        )
+    elif comparison["baseline_is_best"]:
+        st.info(f"**No filter did better than no filtering.** Lowest MSE (tie): {best_labels}.", icon="➖")
+    else:
+        st.success(f"**Lowest MSE / highest PSNR for these settings: {best_labels}.**", icon="🏆")
+    st.caption(
+        "All four filters processed exactly the same noisy pixels (same image, noise, strength "
+        "and seed), and every score uses the same grayscale reference. Each filter uses the "
+        "settings currently chosen for it in the sidebar, or its default if you have not changed "
+        "it. This ranking holds only for this image and these settings; no filter is best in general."
+    )
+    # Explain non-finite PSNR changes once per kind (not once per filter).
+    notes = {}
+    for row in comparison["rows"]:
+        if row["psnr_change_note"]:
+            notes.setdefault(row["psnr_change_note"], []).append(row["label"])
+    for note, filter_labels in notes.items():
+        st.caption(f"{', '.join(filter_labels)}: {note}")
+
+    for column, row in zip(st.columns(4), comparison["rows"][1:]):
+        marker = " ★" if row["method"] in best else ""
+        column.image(
+            fit_for_display(row["image"], max_width=360, max_height=300),
+            caption=f"{row['label']} — {row['parameter_text']}{marker}",
+            output_format="PNG",
+        )
+    st.caption("The original and noisy images are shown in the comparison at the top of the page.")
+
+
+def show_differences(image, noisy, filtered):
+    """Section 6: where did the pixels change? (visualisation only)."""
+    with st.expander("6. Where Did the Pixels Change? — Difference Images"):
+        st.markdown(
+            "A difference image shows where pixels changed and by how much. It does not prove "
+            "that the change improved image quality.\n\n"
+            "Each pixel shows |image A − image B|: **black = no change**, brighter = larger change."
+        )
+        if filtered is None:
+            st.info("No filtered image is available, so only the noise is shown.")
+            pairs = [("A. Noise introduced", "|Original − Noisy|", image.grayscale, noisy)]
+        else:
+            pairs = [
+                ("A. Noise introduced", "|Original − Noisy|", image.grayscale, noisy),
+                ("B. Filter changes", "|Noisy − Filtered|", noisy, filtered),
+                ("C. Remaining error after filtering", "|Original − Filtered|", image.grayscale, filtered),
+            ]
+        differences = [make_difference_image(a, b) for _, _, a, b in pairs]
+        enhanced = st.toggle(
+            "Contrast-enhanced view",
+            value=False,
+            key="difference_enhanced",
+            help="Makes small differences easier to see. Only the display changes.",
+        )
+        if enhanced:
+            shown, factor = enhance_differences(differences)
+            st.caption(
+                f"Contrast enhanced: every difference is multiplied by the same factor {factor:.2f} "
+                "(255 ÷ the largest difference in these images), so the largest difference is white "
+                "and the images stay comparable. This is for viewing only; MSE and PSNR always use "
+                "the real pixels."
+            )
+        else:
+            shown = differences
+            st.caption("Raw view: the brightness of each pixel is the exact difference (0–255).")
+
+        for column, (title, formula, _, _), raw, picture in zip(st.columns(len(pairs)), pairs, differences, shown):
+            facts = summarize_difference(raw)
+            column.image(fit_for_display(picture), caption=f"{title}: {formula}", output_format="PNG")
+            column.caption(
+                f"Changed pixels: {facts['changed_pixels']:,} ({facts['changed_percent']:.1f}%). "
+                f"Largest difference: {facts['largest']}."
+            )
+        if image.pixel_count > fit_for_display(image.grayscale).size:
+            st.caption(
+                "These images are shown smaller than their real size; shrinking averages pixels, so "
+                "small isolated changes can look fainter. The numbers above use every pixel."
+            )
 
 
 def show_dimensions(image):
@@ -561,6 +820,10 @@ def main():
     show_zoom(zoom_images)
     show_noise_explanation(noise_type)
     show_filter_explanation(filter_type)
+
+    show_evaluation(image, noisy, filtered, noise_label, filter_labels[1])
+    show_filter_comparison(image, noisy, all_filter_parameters(filter_type, parameters), filter_type)
+    show_differences(image, noisy, filtered)
     show_dimensions(image)
     show_details(image)
 

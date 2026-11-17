@@ -6,23 +6,10 @@ import numpy as np
 
 from src.image_io import validate_grayscale_image
 
-# --------------------------------------------------------------------------
-# Border handling
-# --------------------------------------------------------------------------
-# Near the image edge, part of the filter window lies outside the image.
-# OpenCV then invents the missing pixels with a "border type". We pass the
-# border type explicitly so the behaviour is visible in the code.
-#
-# BORDER_REFLECT_101 mirrors the image WITHOUT repeating the edge pixel:
-#     outside | image          ->   g f e d c b | a b c d e f g h
-# It is also OpenCV's default (BORDER_DEFAULT == BORDER_REFLECT_101), so this
-# choice does not change OpenCV's normal behaviour; it only makes it explicit.
-# Used by the mean, Gaussian and bilateral filters.
+
 BORDER_TYPE = cv2.BORDER_REFLECT_101
 
-# cv2.medianBlur has NO border parameter. OpenCV documents that it always uses
-# BORDER_REPLICATE internally (repeat the edge pixel: a a a | a b c ...).
-# This constant is only for documentation and tests; it is not passed to OpenCV.
+
 MEDIAN_BORDER_TYPE = cv2.BORDER_REPLICATE
 
 

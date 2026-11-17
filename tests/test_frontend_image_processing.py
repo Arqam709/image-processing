@@ -30,9 +30,20 @@ from frontend.image_processing import (
     UploadedImage,
     apply_selected_filter,
     check_file_name,
+    compare_all_filters,
     crop_square,
     describe_filter,
+    describe_filter_parameters,
     describe_noise,
+    enhance_differences,
+    evaluate_image_quality,
+    format_mse,
+    format_psnr,
+    format_signed,
+    judge_change,
+    make_difference_image,
+    psnr_change,
+    summarize_difference,
     detect_image_format,
     enlarge_pixels,
     fit_for_display,
@@ -52,7 +63,7 @@ from src.filters import (
     apply_median_filter,
 )
 from src.image_io import load_grayscale_image
-from src.metrics import mse
+from src.metrics import mse, psnr
 from src.noise import (
     add_gaussian_noise,
     add_salt_and_pepper_noise,
@@ -915,6 +926,378 @@ class TestThreeImageCrops(unittest.TestCase):
                     np.testing.assert_array_equal(crop, image[top : top + size, left : left + size])
         for image, copy in zip((reference, noisy, filtered), before):
             np.testing.assert_array_equal(image, copy)
+
+
+# --------------------------------------------------------------------------
+# Stage 5D: MSE / PSNR evaluation, four-filter comparison, difference images
+# --------------------------------------------------------------------------
+import math  # noqa: E402
+
+# The illustrative hand-calculation example (NOT a measurement on a real photo):
+HAND_ORIGINAL = np.array([[100, 100, 100, 100]], dtype=np.uint8)
+HAND_NOISY = np.array([[120, 80, 110, 90]], dtype=np.uint8)
+HAND_FILTERED = np.array([[105, 95, 105, 95]], dtype=np.uint8)
+
+DEFAULT_PARAMETERS = {name: dict(FILTER_OPTIONS[name].defaults) for name in FILTER_TYPES}
+
+
+def assert_no_nan(test, value):
+    """Recursively check that no float in a result is NaN."""
+    if isinstance(value, float):
+        test.assertFalse(math.isnan(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            assert_no_nan(test, item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_no_nan(test, item)
+    elif isinstance(value, str):
+        test.assertNotIn("nan", value.lower())
+
+
+class TestHandCalculatedExample(unittest.TestCase):
+    """MSE = (400 + 400 + 100 + 100) / 4 = 250 and (25 * 4) / 4 = 25;
+    PSNR = 10 log10(255^2 / MSE); change = 10 log10(250 / 25) = +10 dB."""
+
+    def test_improvement(self):
+        result = evaluate_image_quality(HAND_ORIGINAL, HAND_NOISY, HAND_FILTERED)
+        self.assertEqual(result["noisy"]["mse"], 250.0)
+        self.assertEqual(result["filtered"]["mse"], 25.0)
+        self.assertAlmostEqual(result["noisy"]["psnr"], 10 * math.log10(255**2 / 250), places=10)
+        self.assertAlmostEqual(result["noisy"]["psnr"], 24.1514, places=4)
+        self.assertAlmostEqual(result["filtered"]["psnr"], 34.1514, places=4)
+        self.assertEqual(result["mse_change"], -225.0)
+        self.assertAlmostEqual(result["psnr_change"], 10.0, places=10)
+        self.assertEqual(result["psnr_change_text"], "+10.00 dB")
+        self.assertIsNone(result["psnr_change_note"])
+        self.assertEqual(result["verdict"], "closer")
+
+    def test_worse_result(self):
+        """MSE 50 -> 450: the 'filter' made the error 9 times larger (-10 log10 9 = -9.54 dB)."""
+        noisy = np.array([[110, 90, 100, 100]], dtype=np.uint8)
+        filtered = np.array([[130, 70, 100, 100]], dtype=np.uint8)
+        result = evaluate_image_quality(HAND_ORIGINAL, noisy, filtered)
+        self.assertEqual(result["noisy"]["mse"], 50.0)
+        self.assertEqual(result["filtered"]["mse"], 450.0)
+        self.assertEqual(result["mse_change"], 400.0)
+        self.assertAlmostEqual(result["psnr_change"], -10 * math.log10(9), places=10)
+        self.assertEqual(result["psnr_change_text"], "−9.54 dB")
+        self.assertEqual(result["verdict"], "farther")
+
+    def test_no_change(self):
+        result = evaluate_image_quality(HAND_ORIGINAL, HAND_NOISY, HAND_NOISY.copy())
+        self.assertEqual(result["mse_change"], 0.0)
+        self.assertEqual(result["psnr_change"], 0.0)
+        self.assertEqual(result["psnr_change_text"], "0.00 dB")
+        self.assertEqual(result["verdict"], "same")
+
+
+class TestEvaluateImageQuality(unittest.TestCase):
+    def setUp(self):
+        self.reference = create_synthetic_test_image()
+        self.noisy = make_noisy_image(self.reference, "gaussian", 25, 42)
+        self.filtered = apply_selected_filter(self.noisy, "bilateral", DEFAULT_PARAMETERS["bilateral"])
+
+    def test_equal_to_direct_metric_calls(self):
+        result = evaluate_image_quality(self.reference, self.noisy, self.filtered)
+        self.assertEqual(result["noisy"]["mse"], mse(self.reference, self.noisy))
+        self.assertEqual(result["noisy"]["psnr"], psnr(self.reference, self.noisy))
+        self.assertEqual(result["filtered"]["mse"], mse(self.reference, self.filtered))
+        self.assertEqual(result["filtered"]["psnr"], psnr(self.reference, self.filtered))
+        self.assertAlmostEqual(result["mse_change"], mse(self.reference, self.filtered) - mse(self.reference, self.noisy))
+        self.assertAlmostEqual(result["psnr_change"], psnr(self.reference, self.filtered) - psnr(self.reference, self.noisy))
+
+    def test_matches_stage4_logged_values(self):
+        """E002 (noisy) and E013 (bilateral 5/50/50) in experiment_log.md."""
+        result = evaluate_image_quality(self.reference, self.noisy, self.filtered)
+        self.assertAlmostEqual(result["noisy"]["mse"], 577.9914, places=4)
+        self.assertAlmostEqual(result["noisy"]["psnr"], 20.5116, places=4)
+        self.assertAlmostEqual(result["filtered"]["mse"], 87.8501, places=4)
+        self.assertAlmostEqual(result["filtered"]["psnr"], 28.6934, places=4)
+        self.assertAlmostEqual(result["psnr_change"], 8.1818, places=4)
+
+    def test_reference_is_the_original_not_the_noisy_image(self):
+        result = evaluate_image_quality(self.reference, self.noisy, self.filtered)
+        self.assertNotEqual(result["filtered"]["mse"], mse(self.noisy, self.filtered))
+
+    def test_inputs_unchanged(self):
+        copies = [self.reference.copy(), self.noisy.copy(), self.filtered.copy()]
+        evaluate_image_quality(self.reference, self.noisy, self.filtered)
+        for image, copy in zip((self.reference, self.noisy, self.filtered), copies):
+            np.testing.assert_array_equal(image, copy)
+
+    def test_identical_images(self):
+        result = evaluate_image_quality(HAND_ORIGINAL, HAND_ORIGINAL.copy(), HAND_ORIGINAL.copy())
+        self.assertEqual(result["noisy"]["mse"], 0.0)
+        self.assertEqual(result["noisy"]["psnr"], math.inf)
+        self.assertIsNone(result["psnr_change"])  # not inf - inf = NaN
+        self.assertEqual(result["psnr_change_text"], "no change (both ∞)")
+        self.assertEqual(result["verdict"], "same")
+        assert_no_nan(self, result)
+
+    def test_filter_reaches_the_original(self):
+        result = evaluate_image_quality(HAND_ORIGINAL, HAND_NOISY, HAND_ORIGINAL.copy())
+        self.assertEqual(result["filtered"]["psnr"], math.inf)
+        self.assertIsNone(result["psnr_change"])
+        self.assertEqual(result["psnr_change_text"], "now identical (∞)")
+        self.assertEqual(result["verdict"], "closer")
+        assert_no_nan(self, result)
+
+    def test_noise_free_input_made_worse(self):
+        result = evaluate_image_quality(HAND_ORIGINAL, HAND_ORIGINAL.copy(), HAND_FILTERED)
+        self.assertEqual(result["noisy"]["psnr"], math.inf)
+        self.assertIsNone(result["psnr_change"])
+        self.assertEqual(result["psnr_change_text"], "worse (was ∞)")
+        self.assertEqual(result["verdict"], "farther")
+        assert_no_nan(self, result)
+
+    def test_invalid_dimensions(self):
+        with self.assertRaisesRegex(ValueError, "filtered image"):
+            evaluate_image_quality(self.reference, self.noisy, self.filtered[:-1])
+        with self.assertRaisesRegex(ValueError, "noisy image"):
+            evaluate_image_quality(self.reference, self.noisy[:, :-1], self.filtered)
+
+    def test_invalid_types(self):
+        with self.assertRaises(TypeError):
+            evaluate_image_quality(self.reference, self.noisy.tolist(), self.filtered)
+        with self.assertRaises(ValueError):
+            evaluate_image_quality(self.reference, self.noisy, self.filtered.astype(np.float64))
+        with self.assertRaises(TypeError):
+            evaluate_image_quality(None, self.noisy, self.filtered)
+
+
+class TestChangeHelpers(unittest.TestCase):
+    def test_psnr_change_cases(self):
+        self.assertEqual(psnr_change(20.0, 28.5), (8.5, "+8.50 dB", None))
+        self.assertEqual(psnr_change(20.0, 17.25)[:2], (-2.75, "−2.75 dB"))
+        for before, after, text in [(math.inf, math.inf, "no change (both ∞)"),
+                                    (20.0, math.inf, "now identical (∞)"),
+                                    (math.inf, 20.0, "worse (was ∞)")]:
+            change, short, note = psnr_change(before, after)
+            self.assertIsNone(change)
+            self.assertEqual(short, text)
+            self.assertIn("∞", note)
+
+    def test_judge_change(self):
+        self.assertEqual(judge_change(10.0, 5.0), "closer")
+        self.assertEqual(judge_change(5.0, 10.0), "farther")
+        self.assertEqual(judge_change(5.0, 5.0), "same")
+        self.assertEqual(judge_change(0.0, 0.0), "same")
+
+    def test_format_signed_never_shows_minus_zero(self):
+        self.assertEqual(format_signed(0.0), "0.00")
+        self.assertEqual(format_signed(-0.0), "0.00")
+        self.assertEqual(format_signed(8.184), "+8.18")
+        self.assertEqual(format_signed(-490.137), "−490.14")
+        self.assertEqual(format_signed(0.001), "+<0.01")
+        self.assertEqual(format_signed(-0.004), "−<0.01")
+        self.assertEqual(format_signed(1.5, "dB"), "+1.50 dB")
+
+    def test_format_mse_and_psnr(self):
+        self.assertEqual(format_mse(1216.9823), "1,216.98")
+        self.assertEqual(format_mse(0.0), "0.00")
+        self.assertEqual(format_psnr(20.5116), "20.51")
+        self.assertEqual(format_psnr(math.inf), "∞")
+
+
+class TestCompareAllFilters(unittest.TestCase):
+    def setUp(self):
+        self.reference = create_synthetic_test_image()
+        self.noisy = make_noisy_image(self.reference, "salt_and_pepper", 0.05, 42)
+        self.parameters = {
+            "mean": {"kernel_size": 5},
+            "gaussian": {"kernel_size": 5, "sigma": 1.2},
+            "median": {"kernel_size": 3},
+            "bilateral": {"diameter": 7, "sigma_color": 30, "sigma_space": 20},
+        }
+
+    def test_rows_equal_direct_filter_and_metric_calls(self):
+        result = compare_all_filters(self.reference, self.noisy, self.parameters)
+        rows = result["rows"]
+        self.assertEqual([r["method"] for r in rows], ["none", "mean", "gaussian", "median", "bilateral"])
+        self.assertEqual(rows[0]["label"], "No filtering")
+        self.assertEqual(rows[0]["mse"], mse(self.reference, self.noisy))
+        self.assertEqual(rows[0]["psnr_change_text"], "baseline")
+        direct = {
+            "mean": apply_mean_filter(self.noisy, 5),
+            "gaussian": apply_gaussian_filter(self.noisy, 5, 1.2),
+            "median": apply_median_filter(self.noisy, 3),
+            "bilateral": apply_bilateral_filter(self.noisy, 7, 30, 20),
+        }
+        for row in rows[1:]:
+            with self.subTest(method=row["method"]):
+                expected = direct[row["method"]]
+                np.testing.assert_array_equal(row["image"], expected)
+                self.assertEqual(row["mse"], mse(self.reference, expected))
+                self.assertEqual(row["psnr"], psnr(self.reference, expected))
+                self.assertAlmostEqual(row["psnr_change"], psnr(self.reference, expected) - psnr(self.reference, self.noisy))
+                self.assertEqual(row["parameters"], self.parameters[row["method"]])
+
+    def test_parameter_text(self):
+        rows = compare_all_filters(self.reference, self.noisy, self.parameters)["rows"]
+        self.assertEqual(
+            [r["parameter_text"] for r in rows],
+            ["—", "5 × 5", "5 × 5, filter σ = 1.2", "3 × 3", "diameter = 7, sigma color = 30, sigma space = 20"],
+        )
+
+    def test_every_filter_gets_the_same_noisy_array(self):
+        received = []
+        real = apply_selected_filter
+
+        def spy(noisy_image, filter_type, parameters):
+            received.append((noisy_image, filter_type, dict(parameters)))
+            return real(noisy_image, filter_type, parameters)
+
+        with mock.patch("frontend.image_processing.apply_selected_filter", side_effect=spy):
+            compare_all_filters(self.reference, self.noisy, self.parameters)
+        self.assertEqual([r[1] for r in received], list(FILTER_TYPES))
+        for noisy_image, filter_type, parameters in received:
+            self.assertIs(noisy_image, self.noisy)  # the very same array, never regenerated
+            self.assertEqual(parameters, self.parameters[filter_type])
+
+    def test_best_method_is_the_lowest_mse(self):
+        result = compare_all_filters(self.reference, self.noisy, self.parameters)
+        lowest = min(r["mse"] for r in result["rows"])
+        self.assertEqual(result["best_methods"], [r["method"] for r in result["rows"] if r["mse"] == lowest])
+        highest_psnr = max(r["psnr"] for r in result["rows"])
+        for method in result["best_methods"]:
+            [row] = [r for r in result["rows"] if r["method"] == method]
+            self.assertEqual(row["psnr"], highest_psnr)
+        self.assertFalse(result["baseline_is_best"])
+
+    def test_no_filter_improves_on_fine_texture(self):
+        """Random texture with very weak noise: every filter destroys more detail than it removes noise."""
+        reference = random_gray(height=64, width=64, seed=5)
+        noisy = make_noisy_image(reference, "gaussian", 2, 1)
+        result = compare_all_filters(reference, noisy, DEFAULT_PARAMETERS)
+        self.assertEqual(result["best_methods"], ["none"])
+        self.assertTrue(result["baseline_is_best"])
+        for row in result["rows"][1:]:
+            self.assertGreater(row["mse"], result["rows"][0]["mse"])
+            self.assertLess(row["psnr_change"], 0)
+
+    def test_all_identical_images_tie_and_no_nan(self):
+        reference = np.full((20, 30), 128, dtype=np.uint8)
+        noisy = make_noisy_image(reference, "gaussian", 0, 42)  # strength 0: unchanged copy
+        result = compare_all_filters(reference, noisy, DEFAULT_PARAMETERS)
+        self.assertEqual(result["best_methods"], ["none", *FILTER_TYPES])
+        self.assertTrue(result["baseline_is_best"])
+        for row in result["rows"][1:]:
+            self.assertEqual(row["psnr"], math.inf)
+            self.assertEqual(row["psnr_change_text"], "no change (both ∞)")
+        assert_no_nan(self, [{k: v for k, v in r.items() if k != "image"} for r in result["rows"]])
+
+    def test_median_reaching_the_original_exactly(self):
+        reference = np.full((64, 64), 128, dtype=np.uint8)
+        noisy = make_noisy_image(reference, "salt_and_pepper", 0.02, 42)
+        result = compare_all_filters(reference, noisy, DEFAULT_PARAMETERS)
+        [median] = [r for r in result["rows"] if r["method"] == "median"]
+        self.assertEqual(median["mse"], 0.0)
+        self.assertEqual(median["psnr_change_text"], "now identical (∞)")
+        self.assertEqual(result["best_methods"], ["median"])
+
+    def test_inputs_unchanged_and_deterministic(self):
+        reference_copy, noisy_copy = self.reference.copy(), self.noisy.copy()
+        first = compare_all_filters(self.reference, self.noisy, self.parameters)
+        second = compare_all_filters(self.reference, self.noisy, self.parameters)
+        np.testing.assert_array_equal(self.reference, reference_copy)
+        np.testing.assert_array_equal(self.noisy, noisy_copy)
+        for a, b in zip(first["rows"], second["rows"]):
+            np.testing.assert_array_equal(a["image"], b["image"])
+            self.assertEqual(a["mse"], b["mse"])
+        self.assertIs(first["rows"][0]["image"], self.noisy)
+
+    def test_invalid_filter_parameters(self):
+        with self.assertRaises(TypeError):
+            compare_all_filters(self.reference, self.noisy, [("mean", {"kernel_size": 3})])
+        missing = {k: v for k, v in DEFAULT_PARAMETERS.items() if k != "median"}
+        with self.assertRaisesRegex(ValueError, "exactly these keys"):
+            compare_all_filters(self.reference, self.noisy, missing)
+        with self.assertRaisesRegex(ValueError, "exactly these keys"):
+            compare_all_filters(self.reference, self.noisy, {**DEFAULT_PARAMETERS, "box": {"kernel_size": 3}})
+        with self.assertRaises(ValueError):
+            compare_all_filters(self.reference, self.noisy, {**DEFAULT_PARAMETERS, "mean": {"kernel_size": 4}})
+
+    def test_invalid_images(self):
+        with self.assertRaises(ValueError):
+            compare_all_filters(self.reference, self.noisy[:-2], DEFAULT_PARAMETERS)
+        with self.assertRaises((TypeError, ValueError)):
+            compare_all_filters(self.reference, self.noisy.astype(np.int16), DEFAULT_PARAMETERS)
+
+    def test_describe_filter_parameters(self):
+        self.assertEqual(describe_filter_parameters("mean", {"kernel_size": 9}), "9 × 9")
+        self.assertEqual(describe_filter_parameters("gaussian", {"kernel_size": 3, "sigma": 0}), "3 × 3, filter σ = auto")
+        with self.assertRaises(ValueError):
+            describe_filter_parameters("box", {"kernel_size": 3})
+
+
+class TestDifferenceImages(unittest.TestCase):
+    def test_exact_absolute_differences(self):
+        a = random_gray(seed=11)
+        b = random_gray(seed=12)
+        expected = np.abs(a.astype(np.int16) - b.astype(np.int16)).astype(np.uint8)
+        np.testing.assert_array_equal(make_difference_image(a, b), expected)
+        np.testing.assert_array_equal(make_difference_image(b, a), expected)  # symmetric
+
+    def test_no_uint8_wrap_around(self):
+        a = np.array([[0, 255, 0, 255, 10]], dtype=np.uint8)
+        b = np.array([[255, 0, 0, 255, 12]], dtype=np.uint8)
+        np.testing.assert_array_equal(make_difference_image(a, b), [[255, 255, 0, 0, 2]])
+        self.assertEqual(int((a - b)[0, 4]), 254)  # what plain uint8 subtraction would give
+
+    def test_result_new_read_only_and_inputs_unchanged(self):
+        a, b = random_gray(seed=1), random_gray(seed=2)
+        copies = (a.copy(), b.copy())
+        diff = make_difference_image(a, b)
+        self.assertFalse(diff.flags.writeable)
+        self.assertFalse(np.shares_memory(diff, a) or np.shares_memory(diff, b))
+        np.testing.assert_array_equal(a, copies[0])
+        np.testing.assert_array_equal(b, copies[1])
+
+    def test_invalid_inputs(self):
+        a = random_gray()
+        with self.assertRaisesRegex(ValueError, "same dimensions"):
+            make_difference_image(a, a[:-1])
+        with self.assertRaisesRegex(ValueError, "second image"):
+            make_difference_image(a, a.astype(np.float32))
+        with self.assertRaises(TypeError):
+            make_difference_image(None, a)
+
+    def test_enhancement_uses_one_shared_factor(self):
+        d1 = np.array([[0, 10, 51]], dtype=np.uint8)
+        d2 = np.array([[0, 5, 20]], dtype=np.uint8)
+        (e1, e2), factor = enhance_differences([d1, d2])
+        self.assertAlmostEqual(factor, 5.0)  # 255 / 51
+        np.testing.assert_array_equal(e1, [[0, 50, 255]])
+        np.testing.assert_array_equal(e2, [[0, 25, 100]])
+        np.testing.assert_array_equal(d1, [[0, 10, 51]])  # inputs unchanged
+
+    def test_enhancement_of_zero_difference(self):
+        zero = np.zeros((3, 3), dtype=np.uint8)
+        (enhanced,), factor = enhance_differences([zero])
+        self.assertEqual(factor, 1.0)
+        np.testing.assert_array_equal(enhanced, zero)
+
+    def test_enhancement_does_not_affect_metrics(self):
+        reference = create_synthetic_test_image()
+        noisy = make_noisy_image(reference, "speckle", 0.04, 42)
+        filtered = apply_selected_filter(noisy, "median", {"kernel_size": 3})
+        before = evaluate_image_quality(reference, noisy, filtered)
+        diffs = [make_difference_image(reference, noisy), make_difference_image(noisy, filtered)]
+        enhance_differences(diffs)
+        after = evaluate_image_quality(reference, noisy, filtered)
+        self.assertEqual(before["noisy"], after["noisy"])
+        self.assertEqual(before["filtered"], after["filtered"])
+
+    def test_summary(self):
+        diff = np.array([[0, 0, 7], [0, 255, 0]], dtype=np.uint8)
+        self.assertEqual(summarize_difference(diff), {"changed_pixels": 2, "changed_percent": 100 * 2 / 6, "largest": 255})
+
+    def test_noise_difference_counts_salt_and_pepper(self):
+        reference = create_synthetic_test_image()
+        noisy = make_noisy_image(reference, "salt_and_pepper", 0.05, 42)
+        facts = summarize_difference(make_difference_image(reference, noisy))
+        self.assertEqual(facts["changed_pixels"], salt_and_pepper_counts(reference.size, 0.05)[0])  # 3,277
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Project Overview: Image Noise Addition and Removal
 
-_Last updated: 2026-11-17 (after Stage 5C)_
+_Last updated: 2026-11-17 (after Stage 5D)_
 
 ## Objective
 Build a Python system that takes a clean digital image, adds controlled noise,
@@ -51,7 +51,7 @@ and why.
 | 5A | Upload, grayscale conversion, preview, dimensions, invalid-file handling (`frontend/`, 38 + 12 tests) | ✅ Done (194/194 tests pass) |
 | 5B | Noise controls (three noise models, strength sliders, seed), original vs noisy display, 1:1 zoom, noise explanations (74 + 26 frontend tests in total) | ✅ Done (244/244 tests pass) |
 | 5C | Filter controls (four filters and their parameters), original / noisy / filtered display, three-image zoom, filter explanations (100 + 41 frontend tests in total) | ✅ Done (285/285 tests pass) |
-| 5D | MSE/PSNR, PSNR change, all-four-filter comparison and table | Not started |
+| 5D | MSE/PSNR evaluation, MSE/PSNR change, four-filter comparison with baseline, difference images (136 + 59 frontend tests in total) | ✅ Done (339/339 tests pass) |
 | 5E | Downloads (noisy, filtered, CSV), final polish and checks | Not started |
 | 6 | Experiment runner (CSV table + saved images) and static comparison figures for the report | Not started |
 | 7 | Analysis of real results | Not started |
@@ -118,8 +118,17 @@ and why.
 | D53 | If a filter raises an error, the page shows a red message, keeps the original and noisy images, and keeps all controls | A recoverable error must not hide the rest of the work. Tested by forcing an error with `unittest.mock`. |
 | D54 | Three images side by side (`st.columns(3)`), each fitted into 420 × 340 px; the zoom panel shows the same region of all three images, enlarged to about 256 px | Keeps portrait and landscape photos compact on a laptop. Streamlit stacks columns vertically on narrow windows. A page test checks that all three zoom captions name the same rows and columns. |
 | D55 | The settings line keeps the 5B format: "**Settings:** noise = … · seed = … · filter = …" | It shows noise, seed and filter together, and the existing 5B tests did not need to change. |
+| D56 | Every MSE/PSNR in the app is computed by `mse()`/`psnr()` from `src/metrics.py` (helper `score_against_reference`), always against the **original grayscale reference** and on the **full-resolution** arrays | One definition of each metric. Noisy-vs-filtered is never used as a quality score. Mutation checks confirmed this: scoring against the noisy image was caught by 11 tests, and scoring on display copies by 5 tests. |
+| D57 | MSE change = filtered − noisy; PSNR change = filtered − noisy (dB). The verdict (closer / farther / same) is decided by comparing the **MSE** values | MSE is always finite, and lower MSE always means higher PSNR, so the verdict never depends on infinity. The page says clearly when the filter made the numbers worse. |
+| D58 | PSNR = ∞ (identical images) is shown as "∞". A PSNR change that is not a finite number (∞ − ∞, x − ∞, ∞ − x) is not computed. The page shows a short text instead ("no change (both ∞)", "now identical (∞)", "worse (was ∞)") with an explanation | Avoids NaN and meaningless infinite "improvements". Tests check that no "nan" or raw "inf" appears on the page in these cases. |
+| D59 | Numbers are shown with 2 decimals. Signed changes never show "−0.00"; a tiny non-zero change shows "+<0.01" | Avoids misleading output. Calculations always use the unrounded values. |
+| D60 | `compare_all_filters(reference, noisy, parameters_of_all_four)` gives every filter **the same noisy array object**. A "No filtering" baseline row is included. Best = all rows with the lowest MSE, and the baseline can win or tie | A spy test checks that the very same array is passed four times. The page says when no filter beats the baseline. Parameters are never tuned automatically. |
+| D61 | The parameters for the comparison: the selected filter uses its current controls; the other filters use their remembered sidebar values (`st.session_state`, kept by `persist_state`) or their Stage 4 defaults. They are shown in the table | The comparison is transparent and reproducible from what the user sees. A test changes the hidden filters' settings and checks the table. |
+| D62 | The four-filter comparison is behind the toggle "Run all four filters": on by default for images ≤ 4 MP and off for larger ones. While on, it is recomputed on every rerun. There is no cache and no stored result | Measured: on a 4000 × 3000 photo a full rerun took about 1.4 s with the comparison off and 3.0–3.9 s with it on. Recomputing means results can never be stale, and a test uploads a second image and checks every number. |
+| D63 | Difference images = `cv2.absdiff` (exact \|A − B\| for uint8, no wrap-around), read-only, for display only. The optional contrast enhancement multiplies **all three** images by one shared factor (255 ÷ largest difference) and is never used for metrics | A shared factor keeps the three images comparable. The raw view stays the default. The text states that a difference does not prove an improvement. |
+| D64 | Errors in sections 4 and 5 are caught and shown like the 5C filter error | Found by the existing 5C error test, which forced the filter to fail: the new comparison had no error handling. That test's "exactly one error" check was updated, because the new section correctly reports its own error; the reason is written in the test. |
 
-## Architecture (Stages 5A–5C)
+## Architecture (Stages 5A–5D)
 ```
 Browser ──upload──► frontend/app.py (Streamlit page: layout, messages, display)
                           │ file name + bytes
@@ -152,21 +161,32 @@ Sidebar controls (filter type, its parameters)
                     (fit_for_display), zoom of all three (crop_square + enlarge_pixels),
                     two pixel fingerprints, dimensions,
                     src.image_io.get_image_info / format_image_info
+                          │
+                          ▼  (Stage 5D: evaluation, always against the ORIGINAL reference)
+    4. evaluate_image_quality(reference, noisy, filtered)
+         ──► src/metrics.py mse() / psnr()  (full-resolution arrays)
+         ──► MSE change, PSNR change (∞-safe), verdict closer / farther / same
+    5. compare_all_filters(reference, noisy, {params of all four filters})   [toggle]
+         the SAME noisy array ──► apply_selected_filter × 4 ──► mse() / psnr()
+         ──► rows: No filtering + 4 filters, best = lowest MSE (baseline included)
+    6. make_difference_image(A, B) = cv2.absdiff  (display only)
+         |Original − Noisy|, |Noisy − Filtered|, |Original − Filtered|
+         optional enhance_differences (one shared factor; never used for metrics)
 ```
-Stage 5D will add calls to `src/metrics.py`.
 
-## Current limitations of the web interface (Stage 5C)
-* Upload, noise and one selected filter work. There are no metrics, no four-filter comparison and no downloads yet.
-* The three-image view is shrunk for large photos, which makes noise and filtering effects look weaker than they are. The zoom panel shows the real pixels; its position is chosen with two sliders, not by clicking on the image.
+## Current limitations of the web interface (Stage 5D)
+* No downloads yet (Stage 5E).
+* The image views are shrunk for large photos, which makes noise, filtering effects and difference images look weaker than they are. All metrics and counts use the full-resolution arrays. The zoom panel shows the real pixels of the main comparison, but there is no zoom for the four-filter grid or the difference images.
 * Each control keeps its value while the user stays on the page. A browser reload resets all controls to their defaults.
-* Rerun times were measured on one computer with 12 CPU threads. Computers with fewer cores will be slower, especially for the median filter at kernel 9 or larger.
+* Speed: on a 4000 × 3000 photo a full rerun took about 1.4 s with the four-filter comparison off and 3.0–3.9 s with it on (12 CPU threads; slower computers will take longer). Part of the cost is that `psnr()` in `src/metrics.py` calls `mse()` again internally, so each MSE+PSNR pair computes the MSE twice. `src/metrics.py` was deliberately not changed.
+* MSE and PSNR measure similarity to the uploaded grayscale photo. They cannot tell whether that photo itself was noise-free, and they do not always agree with human judgement.
 * Transparency is ignored. Only PNG colour types 4 and 6 are detected; palette PNGs with a transparency chunk are not flagged.
 * The pixel limit is checked after decoding. Extremely large images are still limited by OpenCV's own decoder limit.
-* Verified automatically: the helper (100 tests), the page logic (41 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser, including the three-column layout, the sliders and the zoom panel. The student should check this manually.
+* Verified automatically: the helper (136 tests), the page logic (59 Streamlit `AppTest` tests), and that the real server starts and answers on localhost. **Not yet verified:** how the page looks in a real browser, including the tables, the four-image row, the difference images and the overall page length. The student should check this manually.
 
 ## Open items
 * `course_material/template.docx` was read on 2026-11-16. Findings are in `report_notes.md` §0.
 * The student's own photograph is not yet in `data/input/`.
 * OpenCV documentation URLs (V1, V2, V4, V12 in `references.md`) should be opened once in a browser, because the site blocks automated checks.
-* Browser check by the student for Stages 5A–5C: launch the app and follow the manual steps in the stage summaries.
+* Browser check by the student for Stages 5A–5D: launch the app and follow the manual steps in the stage summaries.
 * Filter results so far cover only one setting per filter, two noise cases, one image and one seed. Comparing several kernel sizes and all nine noise baselines is planned for the experiment runner (Stage 6).

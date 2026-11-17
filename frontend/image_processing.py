@@ -13,11 +13,12 @@ algorithms of its own:
   (Stage 5B). This module only chooses WHICH function to call.
 * Filters are applied by calling the existing functions in src/filters.py
   (Stage 5C), in the same way.
-
-Metrics will be connected in Stage 5D in the same way.
+* MSE and PSNR come from the existing functions in src/metrics.py
+  (Stage 5D). The original grayscale image is always the reference.
 """
 
 import hashlib
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePath
@@ -32,6 +33,7 @@ from src.filters import (
     apply_median_filter,
 )
 from src.image_io import validate_grayscale_image
+from src.metrics import mse, psnr
 from src.noise import add_gaussian_noise, add_salt_and_pepper_noise, add_speckle_noise
 
 # --------------------------------------------------------------------------
@@ -461,20 +463,239 @@ def describe_filter(filter_type, parameters, short=False):
                  'Bilateral Filter — diameter = 5, sigma color = 50, sigma space = 50'.
     """
     option = get_filter_option(filter_type)
+    if filter_type == "bilateral" and short:
+        return f"{option.label} — d = {parameters['diameter']}"
+    return f"{option.label} — {describe_filter_parameters(filter_type, parameters)}"
+
+
+def describe_filter_parameters(filter_type, parameters):
+    """The parameters as text, e.g. '3 × 3, filter σ = auto' or
+    'diameter = 5, sigma color = 50, sigma space = 50'."""
+    get_filter_option(filter_type)
     if filter_type == "bilateral":
-        d = parameters["diameter"]
-        if short:
-            return f"{option.label} — d = {d}"
         return (
-            f"{option.label} — diameter = {d}, sigma color = {parameters['sigma_color']:g}, "
+            f"diameter = {parameters['diameter']}, sigma color = {parameters['sigma_color']:g}, "
             f"sigma space = {parameters['sigma_space']:g}"
         )
     k = parameters["kernel_size"]
-    text = f"{option.label} — {k} × {k}"
+    text = f"{k} × {k}"
     if filter_type == "gaussian":
         sigma = parameters["sigma"]
         text += ", filter σ = auto" if sigma == 0 else f", filter σ = {sigma:g}"
     return text
+
+
+# --------------------------------------------------------------------------
+# Evaluation (Stage 5D): MSE and PSNR from src/metrics.py
+# --------------------------------------------------------------------------
+# Every score compares an image with the ORIGINAL grayscale reference, using
+# the full-resolution arrays (never the shrunk display copies).
+
+
+def score_against_reference(reference, image, name):
+    """Return {"mse": ..., "psnr": ...} for `image` compared with the reference.
+
+    Both numbers come from src/metrics.py, which also checks that both are
+    2-D uint8 images of the same size. `name` is added to any error message.
+    """
+    try:
+        return {"mse": mse(reference, image), "psnr": psnr(reference, image)}
+    except (TypeError, ValueError) as error:
+        raise type(error)(f"{name}: {error}") from error
+
+
+def format_signed(value, unit=""):
+    """'+8.18', '-490.14', '0.00'; never '-0.00'. Tiny non-zero values show as '+<0.01'."""
+    if value == 0:
+        text = "0.00"
+    elif round(value, 2) == 0:
+        text = "+<0.01" if value > 0 else "−<0.01"
+    else:
+        text = f"{value:+.2f}".replace("-", "−")
+    return f"{text} {unit}".strip()
+
+
+def format_mse(value):
+    return f"{value:,.2f}"
+
+
+def format_psnr(value):
+    """PSNR with two decimals, or '∞' for identical images (MSE = 0)."""
+    return "∞" if math.isinf(value) else f"{value:.2f}"
+
+
+def psnr_change(before, after):
+    """PSNR change after - before, safe for infinity.
+
+    Returns (change, short_text, explanation):
+      * both finite      -> (after - before, '+8.18 dB', None)
+      * otherwise change is None (it is not a finite number, and inf - inf
+        would be NaN), and short_text / explanation say what happened.
+    PSNR is infinite only when the image is identical to the reference.
+    """
+    if math.isinf(before) and math.isinf(after):
+        return None, "no change (both ∞)", (
+            "Both images are identical to the original (MSE = 0, PSNR = ∞), so nothing changed."
+        )
+    if math.isinf(after):
+        return None, "now identical (∞)", (
+            "The filtered image is identical to the original (MSE = 0, PSNR = ∞). "
+            "The improvement cannot be written as a finite number of dB."
+        )
+    if math.isinf(before):
+        return None, "worse (was ∞)", (
+            "The noisy image was identical to the original (MSE = 0, PSNR = ∞), so there was no "
+            "error to remove. Filtering added error, so the change cannot be written as a finite "
+            "number of dB."
+        )
+    change = after - before
+    return change, format_signed(change, "dB"), None
+
+
+def judge_change(before_mse, after_mse):
+    """'closer', 'farther' or 'same', comparing errors against the original.
+
+    Uses MSE (always a finite number), so infinity never causes problems.
+    Lower MSE always means higher PSNR, so both metrics agree.
+    """
+    if after_mse < before_mse:
+        return "closer"
+    if after_mse > before_mse:
+        return "farther"
+    return "same"
+
+
+def evaluate_image_quality(reference, noisy, filtered):
+    """Compare the noisy and the filtered image with the original reference.
+
+    Returns a dict:
+        noisy, filtered : {"mse", "psnr"} each, from src/metrics.py
+        mse_change      : filtered MSE - noisy MSE (negative = less error)
+        psnr_change     : filtered PSNR - noisy PSNR in dB, or None if not finite
+        psnr_change_text, psnr_change_note : text from psnr_change()
+        verdict         : "closer", "farther" or "same" (filtered vs noisy)
+    No image is changed.
+    """
+    noisy_scores = score_against_reference(reference, noisy, "noisy image")
+    filtered_scores = score_against_reference(reference, filtered, "filtered image")
+    change, change_text, change_note = psnr_change(noisy_scores["psnr"], filtered_scores["psnr"])
+    return {
+        "noisy": noisy_scores,
+        "filtered": filtered_scores,
+        "mse_change": filtered_scores["mse"] - noisy_scores["mse"],
+        "psnr_change": change,
+        "psnr_change_text": change_text,
+        "psnr_change_note": change_note,
+        "verdict": judge_change(noisy_scores["mse"], filtered_scores["mse"]),
+    }
+
+
+def compare_all_filters(reference, noisy, filter_parameters):
+    """Apply all four filters to the SAME noisy image and score everything.
+
+    filter_parameters: dict with one entry per filter type, e.g.
+        {"mean": {"kernel_size": 3}, "gaussian": {...}, "median": {...}, "bilateral": {...}}
+    Every filter gets exactly the same `noisy` array (it is never regenerated),
+    and every score uses the same `reference`.
+
+    Returns a dict:
+        rows : list of dicts, first the "No filtering" baseline, then the four
+               filters, each with method, label, parameters (dict or None),
+               parameter_text, image, mse, psnr, psnr_change,
+               psnr_change_text, psnr_change_note
+        best_methods     : the method(s) with the lowest MSE (= highest PSNR),
+                           the baseline "none" included
+        baseline_is_best : True if no filter beats "No filtering"
+    """
+    if not isinstance(filter_parameters, dict):
+        raise TypeError(f"filter_parameters must be a dict, got {type(filter_parameters).__name__}.")
+    if set(filter_parameters) != set(FILTER_TYPES):
+        raise ValueError(f"filter_parameters must have exactly these keys: {', '.join(FILTER_TYPES)}.")
+
+    baseline = score_against_reference(reference, noisy, "noisy image")
+    rows = [
+        {
+            "method": "none",
+            "label": "No filtering",
+            "parameters": None,
+            "parameter_text": "—",
+            "image": noisy,
+            **baseline,
+            "psnr_change": None,
+            "psnr_change_text": "baseline",
+            "psnr_change_note": None,
+        }
+    ]
+    for filter_type in FILTER_TYPES:
+        parameters = filter_parameters[filter_type]
+        filtered = apply_selected_filter(noisy, filter_type, parameters)
+        scores = score_against_reference(reference, filtered, FILTER_OPTIONS[filter_type].label)
+        change, change_text, change_note = psnr_change(baseline["psnr"], scores["psnr"])
+        rows.append(
+            {
+                "method": filter_type,
+                "label": FILTER_OPTIONS[filter_type].label,
+                "parameters": dict(parameters),
+                "parameter_text": describe_filter_parameters(filter_type, parameters),
+                "image": filtered,
+                **scores,
+                "psnr_change": change,
+                "psnr_change_text": change_text,
+                "psnr_change_note": change_note,
+            }
+        )
+
+    lowest = min(row["mse"] for row in rows)
+    best_methods = [row["method"] for row in rows if row["mse"] == lowest]
+    return {"rows": rows, "best_methods": best_methods, "baseline_is_best": "none" in best_methods}
+
+
+# --------------------------------------------------------------------------
+# Difference images (Stage 5D): visualisation only, not a quality metric
+# --------------------------------------------------------------------------
+def make_difference_image(image_a, image_b):
+    """Return |image_a - image_b| for every pixel, as a new read-only uint8 image.
+
+    cv2.absdiff works on the uint8 values without wrapping around
+    (|0 - 255| = 255, not 1), so every value is the exact absolute difference.
+    Black (0) = no change; brighter = larger change.
+    """
+    for name, image in (("first image", image_a), ("second image", image_b)):
+        try:
+            validate_grayscale_image(image)
+        except (TypeError, ValueError) as error:
+            raise type(error)(f"{name}: {error}") from error
+    if image_a.shape != image_b.shape:
+        raise ValueError(f"Images must have the same dimensions: {image_a.shape} vs {image_b.shape}.")
+    return _read_only(cv2.absdiff(image_a, image_b))
+
+
+def enhance_differences(differences):
+    """Contrast-stretch difference images FOR DISPLAY ONLY.
+
+    All images are multiplied by the SAME factor 255 / (largest difference in
+    any of them), so they stay comparable with each other: the largest
+    difference becomes white. Returns (enhanced_images, factor).
+    If there is no difference at all, the factor is 1 and nothing changes.
+    The input images are not changed, and the results must never be used
+    for MSE or PSNR.
+    """
+    peak = max(int(d.max()) for d in differences)
+    if peak == 0:
+        return [d.copy() for d in differences], 1.0
+    factor = 255.0 / peak
+    enhanced = [np.rint(d.astype(np.float64) * factor).astype(np.uint8) for d in differences]
+    return enhanced, factor
+
+
+def summarize_difference(difference):
+    """Simple facts about a difference image: changed pixels and the largest change."""
+    changed = int(np.count_nonzero(difference))
+    return {
+        "changed_pixels": changed,
+        "changed_percent": 100.0 * changed / difference.size,
+        "largest": int(difference.max()),
+    }
 
 
 def pixel_fingerprint(image):

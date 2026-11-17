@@ -1,6 +1,6 @@
 # Presentation Notes (simple English)
 
-_Last updated: 2026-11-17 (after Stage 5C)_
+_Last updated: 2026-11-17 (after Stage 5D)_
 
 ## What the project does (planned, in one breath)
 "We take a clean picture, add a known amount of noise to it on purpose, try
@@ -59,7 +59,7 @@ check the file's fingerprint (SHA-256 hash) is unchanged after loading.
 
 **How do you know the code works?**
 32 automated unit tests for Stage 1 (Python `unittest`), run on 2026-11-16, all passing
-(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A, 244 after Stage 5B, 285 after Stage 5C).
+(63 in total after Stage 2, 101 after Stage 3, 144 after Stage 4, 194 after Stage 5A, 244 after Stage 5B, 285 after Stage 5C, 339 after Stage 5D).
 They check correct pixel values, colour-to-gray conversion, and every error
 case: missing file, empty file, corrupted file, wrong type, and so on.
 
@@ -430,6 +430,82 @@ are identical. Whether a filter is *better* is measured with MSE and PSNR in the
   about 0.7–1.1 s.
 * *What happens if a filter fails?* A red message appears, the original and noisy images stay
   visible, and all settings are kept. A test forces an error to check this.
+
+---
+
+## Stage 5D: measuring the result in the web app
+
+**MSE and PSNR in simple words:**
+* **MSE (Mean Squared Error):** for every pixel, take "original minus processed", square it,
+  and average. 0 means identical; **lower is better**.
+  * Squaring makes every error positive and punishes big errors: one pixel off by 20 adds 400,
+    but two pixels off by 10 add only 200.
+* **PSNR (Peak Signal-to-Noise Ratio):** the same information on a logarithmic scale in decibels:
+  PSNR = 10 · log₁₀(255² / MSE). **Higher is better.**
+  * +10 dB means the MSE became 10 times smaller.
+  * Identical images have MSE 0 and PSNR = ∞.
+
+**The example I can calculate on the board** (illustrative numbers, not a measurement):
+* original 100, 100, 100, 100; noisy 120, 80, 110, 90
+  → MSE = (400 + 400 + 100 + 100) / 4 = **250** → PSNR = 10 · log₁₀(65025 / 250) = **24.15 dB**
+* filtered 105, 95, 105, 95 → MSE = **25** → PSNR = **34.15 dB** → change **+10 dB**
+  (10 times smaller error)
+
+Our `mse()` and `psnr()` functions give exactly these values, and a test checks it.
+
+**Why is the original image the reference?** We added the noise ourselves to the original, so
+we know what the "correct" picture is. The noisy image is *not* correct, so comparing the filtered
+image with the noisy one would reward a filter for doing nothing. Every number in the app compares
+with the original grayscale image, using the full-size arrays, not the small pictures on screen.
+
+**Can a filter make the image worse? Yes, and the app says so.**
+* A filter does not know which part is noise and which part is real detail.
+* On our synthetic image with Gaussian noise σ = 25, a 3 × 3 mean filter *raised* the MSE from
+  577.99 to 945.68 (experiment E010), because it blurred the thin lines.
+* On a fine-texture image with very weak noise, every filter can be worse than doing nothing.
+* That is why the comparison always includes **"No filtering"** as a baseline, and that baseline
+  can win.
+
+**How the four-filter comparison is kept fair:**
+* The same original, the same noise settings and seed, and the **same noisy pixel array** for all
+  four filters. A test checks that it is literally the same array.
+* The filter settings are shown in the table. Nothing is tuned automatically to make one filter
+  look better.
+* The winner (★) is only the winner for *this* image and *these* settings.
+
+**Difference images in simple words:** "Black means the pixel did not change; the brighter the
+pixel, the bigger the change."
+* **A, Original vs Noisy:** where the noise is.
+* **B, Noisy vs Filtered:** what the filter changed.
+* **C, Original vs Filtered:** the error that is left.
+* The "contrast-enhanced" view only brightens the picture so small changes are visible. All three
+  images are brightened by the same factor, and the numbers never use it.
+* A difference image shows *where* something changed, not *whether* it got better.
+
+### Likely questions about the evaluation
+* *Why both MSE and PSNR?* PSNR is the usual way to report results in image processing papers;
+  MSE is easier to calculate and explain. They always agree on which image is closer.
+* *What does PSNR = ∞ mean?* The image is identical to the original (MSE = 0). We show "∞" and
+  never calculate "∞ − ∞", because that is not a number.
+* *If PSNR went up, does the image look better?* Not necessarily. PSNR counts pixel errors and
+  does not know about human vision. A blurred image and a speckled image can have the same PSNR.
+* *Your photo is not perfect either. Is it a fair reference?* The numbers measure only the noise
+  we added and what the filter did. Noise that was already in the photo counts as "correct", so
+  the metrics cannot judge the photo itself.
+* *Why is the four-filter comparison sometimes switched off?* For big photos it takes about 3–4
+  seconds (measured on our computer), so it starts switched off above 4 megapixels. It is never
+  cached, so when it is on, its numbers are always up to date.
+* *The median filter is "the" salt-and-pepper filter. Why did it lose on the synthetic image?*
+  * In the flat area it removed 99.7% of the salt-and-pepper error (Stage 4).
+  * But a 3 × 3 median also deletes every 1-pixel line, and the line block dominates the
+    whole-image MSE.
+  * So the whole-image PSNR went *down* by 0.80 dB (E016). This shows why one number for the whole
+    image must be interpreted carefully, and why difference image C helps: it shows where the
+    remaining error is.
+* *How do you know the numbers are right?* We check them in three ways:
+  * They come from the same tested `src/metrics.py` (31 tests).
+  * The page tests compare every table value with a direct calculation.
+  * The app reproduces the Stage 4 experiment log exactly (e.g. E013: MSE 87.8501, +8.1818 dB).
 
 ---
 
